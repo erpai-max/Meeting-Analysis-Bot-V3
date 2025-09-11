@@ -11,6 +11,10 @@ import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from faster_whisper import WhisperModel
 
+# Import utility modules
+import gdrive
+import sheets
+
 # =======================
 # PII Redaction
 # =======================
