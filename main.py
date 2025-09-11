@@ -1,7 +1,10 @@
 import logging
-import yaml
 import sys
-import os
+import yaml
+import json
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+import gspread
 
 # Import utility modules
 import gdrive
@@ -14,42 +17,74 @@ import sheets
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # =======================
-# Main Orchestration
+# Authentication (Now in main.py to prevent mix-ups)
+# =======================
+def authenticate_google_services():
+    """Authenticates with Google services and returns separate clients for Drive and Sheets."""
+    logging.info("Attempting to authenticate with Google services...")
+    try:
+        gcp_key_str = os.environ.get("GCP_SA_KEY")
+        if not gcp_key_str:
+            logging.error("CRITICAL: GCP_SA_KEY environment variable not found.")
+            return None, None
+
+        creds_info = json.loads(gcp_key_str)
+        scopes = [
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets",
+        ]
+        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+
+        # This is the Google Drive client
+        drive_service = build("drive", "v3", credentials=creds)
+        # This is the Google Sheets client
+        gsheets_client = gspread.authorize(creds)
+
+        logging.info("SUCCESS: Authentication with Google services complete.")
+        return drive_service, gsheets_client
+    except Exception as e:
+        logging.error(f"CRITICAL: Authentication failed: {e}")
+        return None, None
+        
+# =======================
+# Main Orchestrator
 # =======================
 def main():
-    """Main function to run the entire analysis workflow."""
+    """Main function to orchestrate the entire analysis pipeline."""
     logging.info("--- Starting Meeting Analysis Bot v3 ---")
-
-    # 1. Load Configuration
+    
     try:
         with open("config.yaml", "r") as f:
             config = yaml.safe_load(f)
-    except FileNotFoundError:
-        logging.error("CRITICAL: config.yaml not found. Please create it. Exiting.")
+    except Exception as e:
+        logging.error(f"CRITICAL: Could not load config.yaml: {e}. Exiting.")
         sys.exit(1)
 
-    # 2. Authenticate all Google Services
-    drive_service, gsheets_client = gdrive.authenticate_google_services()
+    drive_service, gsheets_client = authenticate_google_services()
     if not drive_service or not gsheets_client:
-        logging.error("CRITICAL: Exiting due to authentication failure.")
         sys.exit(1)
 
-    # 3. Get Processed File Ledger
-    processed_file_ids = sheets.get_processed_file_ids(gsheets_client, config)
-    logging.info(f"Found {len(processed_file_ids)} files in the processed ledger. They will be skipped.")
-
-    # 4. Discover Team Folders
-    team_folders = gdrive.discover_team_folders(drive_service, config['google_drive']['parent_folder_id'])
+    try:
+        processed_file_ids = sheets.get_processed_file_ids(gsheets_client, config)
+    except Exception as e:
+        logging.error(f"CRITICAL: Could not retrieve processed file ledger: {e}. Exiting.")
+        sys.exit(1)
+        
+    parent_folder_id = config.get('google_drive', {}).get('parent_folder_id')
+    team_folders = gdrive.discover_team_folders(drive_service, parent_folder_id)
     if not team_folders:
-        logging.warning("No team folders were discovered. Exiting.")
+        logging.warning("No team folders were discovered. Nothing to process. Exiting.")
         sys.exit(0)
 
-    # 5. Process Files in Each Folder
+    logging.info("Starting to check discovered team folders...")
     for member_name, folder_id in team_folders.items():
-        logging.info(f"--- Checking folder for team member: {member_name} ---")
+        logging.info(f"--- Checking folder for team member: {member_name} (ID: {folder_id}) ---")
         try:
             files_to_process = gdrive.get_files_to_process(drive_service, folder_id, processed_file_ids)
             logging.info(f"Found {len(files_to_process)} new media file(s) for {member_name}.")
+            
+            if not files_to_process:
+                continue
 
             for file_meta in files_to_process:
                 file_id = file_meta["id"]
@@ -57,38 +92,36 @@ def main():
                 logging.info(f"--- Processing file: {file_name} (ID: {file_id}) ---")
 
                 try:
-                    # Core Analysis Pipeline for a single file
                     file_content = gdrive.download_file(drive_service, file_id)
                     transcript, duration_sec = analysis.transcribe_audio(file_content, file_name, config)
 
                     if transcript:
-                        analysis_result = analysis.analyze_transcript(transcript, member_name, config)
+                        analysis_data = analysis.analyze_transcript(transcript, member_name, config)
 
-                        if analysis_result == "RATE_LIMIT_EXCEEDED":
-                            logging.warning("Gemini API quota exceeded. Stopping the current workflow run.")
+                        if analysis_data == "RATE_LIMIT_EXCEEDED":
+                            logging.warning("Gemini API quota exceeded. Stopping workflow.")
                             sys.exit(0)
 
-                        if analysis_result:
-                            enriched_data = analysis.enrich_data_from_context(analysis_result, member_name, file_meta, duration_sec, config)
+                        if analysis_data:
+                            enriched_data = analysis.enrich_data_from_context(analysis_data, member_name, file_meta, duration_sec, config)
                             sheets.write_results(gsheets_client, enriched_data, config)
                             gdrive.move_file(drive_service, file_id, folder_id, config['google_drive']['processed_folder_id'])
-                            sheets.update_ledger(gsheets_client, file_id, "PROCESSED", "", config)
+                            sheets.update_ledger(gsheets_client, file_id, "Success", "", config)
                         else:
                             raise ValueError("Gemini analysis returned no data.")
                     else:
-                        raise ValueError("Transcription failed or produced no text.")
+                        raise ValueError("Transcription failed or produced an empty transcript.")
 
                 except Exception as e:
-                    logging.error(f"ERROR processing file {file_name}: {e}. Moving to quarantine.")
+                    error_message = f"Error processing file {file_name}: {e}"
+                    logging.error(error_message)
                     gdrive.quarantine_file(drive_service, file_id, folder_id, str(e), config)
-                    sheets.update_ledger(gsheets_client, file_id, "QUARANTINED", str(e), config)
+                    sheets.update_ledger(gsheets_client, file_id, "Quarantined", str(e), config)
 
         except Exception as e:
             logging.error(f"CRITICAL ERROR while processing {member_name}'s folder: {e}")
 
-    logging.info("--- Meeting Analysis Bot v3 finished successfully ---")
+    logging.info("--- Main execution finished ---")
 
 if __name__ == "__main__":
     main()
-
-
