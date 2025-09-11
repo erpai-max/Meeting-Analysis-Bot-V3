@@ -14,7 +14,7 @@ DEFAULT_HEADERS = [
     "Product Pitch Score", "Cross-Sell / Opportunity Handling", "Closing Effectiveness",
     "Negotiation Strength", "Overall Sentiment", "Total Score", "% Score",
     "Risks / Unresolved Issues", "Improvements Needed", "Owner", "Email Id",
-    "Kibana ID", "Manager", "Product Pitch", "Team", "Media Link", "Doc Link",
+    "Kibana ID", "Manager", "Manager Email", "Product Pitch", "Team", "Media Link", "Doc Link",
     "Suggestions & Missed Topics", "Pre-meeting brief", "Meeting duration (min)",
     "Rebuttal Handling", "Rapport Building", "Improvement Areas",
     "Product Knowledge Displayed", "Call Effectiveness and Control",
@@ -45,11 +45,10 @@ def get_processed_file_ids(gsheets_client: gspread.Client, config: Dict) -> Set[
             worksheet = spreadsheet.worksheet(ledger_tab_name)
         except gspread.WorksheetNotFound:
             logging.warning(f"Ledger tab '{ledger_tab_name}' not found. Creating it.")
-            worksheet = spreadsheet.add_worksheet(title=ledger_tab_name, rows="100", cols="20")
+            worksheet = spreadsheet.add_worksheet(title=ledger_tab_name, rows="100", cols="4")
             worksheet.append_row(["File ID", "Status", "Timestamp", "Error Message"])
             return set()
 
-        # Get all values from the first column (File IDs), skipping the header
         processed_ids = set(worksheet.col_values(1)[1:])
         logging.info(f"Found {len(processed_ids)} file IDs in the ledger.")
         return processed_ids
@@ -76,7 +75,6 @@ def write_results(gsheets_client: gspread.Client, data: Dict[str, str], config: 
         headers = worksheet.row_values(1)
         if not headers:
             logging.info("No headers found in results sheet. Writing default headers.")
-            # This is the corrected part: Use the constant, not the config
             worksheet.append_row(DEFAULT_HEADERS, value_input_option="USER_ENTERED")
             headers = DEFAULT_HEADERS
 
