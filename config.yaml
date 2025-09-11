@@ -7,19 +7,19 @@
 # -------------------
 google_drive:
   # The main parent folder containing all city/team folders.
-  parent_folder_id: "YOUR_MAIN_TRACKER_FOLDER_ID_HERE"
+  parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
 
   # Folder where successfully analyzed files will be moved.
-  processed_folder_id: "YOUR_PROCESSED_FOLDER_ID_HERE"
+  processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
 
   # Folder for files that fail with an unrecoverable error.
-  quarantine_folder_id: "YOUR_QUARANTINE_FOLDER_ID_HERE"
+  quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
 
 # -------------------
 # Google Sheets Configuration
 # -------------------
 google_sheets:
-  sheet_id: "YOUR_GOOGLE_SHEET_ID_HERE"
+  sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
   results_worksheet_name: "Analysis Results"
   ledger_worksheet_name: "Processed Ledger"
 
