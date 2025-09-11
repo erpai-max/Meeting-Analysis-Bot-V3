@@ -6,13 +6,13 @@
 # Google Drive Folder IDs
 # -------------------
 google_drive:
-  # The main parent folder containing all city/team folders.
+  # The ID of your main parent folder (e.g., "Meeting Tracker 2025")
   parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
 
-  # Folder where successfully analyzed files will be moved.
+  # The ID of the folder where successfully processed files will be moved.
   processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
 
-  # Folder for files that fail with an unrecoverable error.
+  # The ID of the folder for files that fail with an unrecoverable error.
   quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
 
 # -------------------
@@ -21,10 +21,11 @@ google_drive:
 google_sheets:
   sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
   results_tab_name: "Analysis Results"
-  ledger_tab_name: "Processed Ledger" # <-- ADD THIS LINE
+  ledger_tab_name: "Processed Ledger"
 
 # -------------------
 # Team and Manager Mapping
+# NOTE: The names here (e.g., "Sripal") MUST EXACTLY MATCH the folder names in Google Drive.
 # -------------------
 manager_map:
   Sripal: { Manager: "Saleem", Team: "Chennai", Email: "sripal.r@nobroker.in" }
@@ -41,21 +42,23 @@ manager_map:
   Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
-  Saleem: { Manager: "Self", Team: "Management", Email: "saleem@example.com" }
+  Saleem: { Manager: "Self", Team: "Management", Email: "saleem@example.com" } # Example for a manager's folder
 
 # -------------------
 # Analysis Settings
 # -------------------
 analysis:
   redact_pii: true
-  enable_diarization: false
+  enable_diarization: false # Set to true and add HF_TOKEN secret to enable
+  whisper_model: 'tiny.en'
+  gemini_model: 'gemini-1.5-flash'
 
 # -------------------
 # Gemini Prompt Template
 # -------------------
 gemini_prompt: |
   ### ROLE AND GOAL ###
-  You are an expert sales meeting analyst for our company. Your goal is to meticulously analyze a sales meeting transcript, score the performance of the sales representative '{owner_name}', and extract key business information.
+  You are an expert sales meeting analyst for our company, specializing in Society Management software. Your goal is to meticulously analyze a sales meeting transcript, score the performance of the sales representative '{owner_name}', and extract key business information.
 
   ### CONTEXT: PRODUCT AND PRICING INFORMATION ###
   ---
@@ -100,5 +103,4 @@ gemini_prompt: |
       "Action items": "", "Positive Factors": "", "Negative Factors": "", "Customer Needs": "",
       "Overall Client Sentiment": "", "Feature Checklist Coverage": ""
   }}
-
 
