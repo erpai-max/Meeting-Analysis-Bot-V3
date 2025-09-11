@@ -43,7 +43,12 @@ manager_map:
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
   Saleem: { Manager: "Self", Team: "Management", Email: "saleem@example.com" } # Example for a manager's folder
-
+# -------------------
+# Manager Email Mapping
+# -------------------
+manager_emails:
+  Saleem: "saleem.hk@nobroker.in"
+  Dipesh: "dipesh.karale@nobroker.in"
 # -------------------
 # Analysis Settings
 # -------------------
