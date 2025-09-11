@@ -20,8 +20,8 @@ google_drive:
 # -------------------
 google_sheets:
   sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
-  results_worksheet_name: "Analysis Results"
-  ledger_worksheet_name: "Processed Ledger"
+  results_tab_name: "Analysis Results"
+  ledger_tab_name: "Processed Ledger"
 
 # -------------------
 # Team and Manager Mapping
