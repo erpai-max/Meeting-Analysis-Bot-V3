@@ -1,1 +1,14 @@
+# Core Google Libraries
+google-api-python-client
+google-auth-oauthlib
+gspread
+
+# AI & Transcription
+google-generativeai
+faster-whisper
+
+# Utilities
+pyyaml
+tenacity
+
 
