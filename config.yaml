@@ -19,9 +19,9 @@ google_drive:
 # Google Sheets Configuration
 # -------------------
 google_sheets:
-  sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
+  sheet_id: "YOUR_GOOGLE_SHEET_ID_HERE"
   results_tab_name: "Analysis Results"
-  ledger_tab_name: "Processed Ledger"
+  ledger_tab_name: "Processed Ledger" # <-- ADD THIS LINE
 
 # -------------------
 # Team and Manager Mapping
