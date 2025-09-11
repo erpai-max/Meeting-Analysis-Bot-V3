@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import tempfile  # <-- THIS IS THE FIX
 from typing import Dict, Tuple, Optional
 
 import google.generativeai as genai
@@ -18,9 +19,7 @@ from faster_whisper import WhisperModel
 # =======================
 def redact_pii(text: str) -> str:
     """Redacts email addresses and phone numbers from a string."""
-    # Redact email addresses
     text = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '[REDACTED EMAIL]', text)
-    # Redact phone numbers (basic patterns for Indian numbers)
     text = re.sub(r'(\+91[\-\s]?)?[789]\d{9}', '[REDACTED PHONE]', text)
     return text
 
@@ -30,7 +29,6 @@ def redact_pii(text: str) -> str:
 def transcribe_audio(file_content: io.BytesIO, original_filename: str, config: Dict) -> Tuple[Optional[str], float]:
     """Transcribes audio and returns the transcript and duration."""
     logging.info("Starting transcription process...")
-    # Use a temporary file to interface with Whisper
     with tempfile.NamedTemporaryFile(suffix=os.path.splitext(original_filename)[1], delete=False) as temp_file:
         temp_file.write(file_content.read())
         temp_file_path = temp_file.name
@@ -52,7 +50,6 @@ def transcribe_audio(file_content: io.BytesIO, original_filename: str, config: D
         logging.error(f"ERROR: Transcription failed: {e}")
         return None, 0.0
     finally:
-        # Ensure temporary file is always cleaned up
         os.remove(temp_file_path)
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
@@ -60,8 +57,9 @@ def transcribe_audio(file_content: io.BytesIO, original_filename: str, config: D
 # Gemini Analysis with Retry Logic
 # =======================
 RETRY_CONFIG_GEMINI = {
-    'wait': wait_exponential(multiplier=1, min=4, max=60),
+    'wait': wait_exponential(multiplier=2, min=5, max=60),
     'stop': stop_after_attempt(3),
+    'retry_error_callback': lambda retry_state: "RATE_LIMIT_EXCEEDED" if isinstance(retry_state.outcome.exception(), google_exceptions.ResourceExhausted) else None,
 }
 
 @retry(**RETRY_CONFIG_GEMINI)
@@ -75,14 +73,13 @@ def analyze_transcript(transcript: str, owner_name: str, config: Dict):
 
     genai.configure(api_key=gemini_api_key)
     
-    # Redact PII if enabled in config
     if config.get('analysis', {}).get('redact_pii', False):
         logging.info("PII redaction is enabled. Redacting transcript...")
         transcript = redact_pii(transcript)
 
     try:
         model = genai.GenerativeModel(config.get('analysis', {}).get('gemini_model', 'gemini-1.5-flash'))
-        prompt = config['analysis']['gemini_prompt_template'].format(
+        prompt = config['gemini_prompt'].format(
             owner_name=owner_name,
             transcript=transcript
         )
@@ -91,53 +88,46 @@ def analyze_transcript(transcript: str, owner_name: str, config: Dict):
         logging.info("SUCCESS: Analysis with Gemini complete.")
         return json.loads(response.text)
     except google_exceptions.ResourceExhausted as e:
-        logging.error(f"ERROR: Gemini API analysis failed with 429 Quota Exceeded: {e}")
-        return "RATE_LIMIT_EXCEEDED"
+        logging.error(f"ERROR: Gemini API analysis failed with 429 Quota Exceeded. Will stop this run.")
+        raise
     except Exception as e:
         logging.error(f"ERROR: Gemini API analysis failed: {e}")
-        raise  # Re-raise to allow tenacity to retry
+        raise
 
 # =======================
 # Data Enrichment
 # =======================
 def enrich_data_from_context(analysis_data: Dict, member_name: str, file_meta: Dict, duration_seconds: float, config: Dict) -> Dict:
-    """Overrides 'N/A' values in analysis_data with info from file context."""
+    """Overrides empty values in analysis_data with info from file context."""
     logging.info("Enriching data with context from filename and folder structure...")
     
     file_name = file_meta.get("name", "")
-    manager_map = config.get('mappings', {}).get('manager_map', {})
+    manager_map = config.get('manager_map', {})
 
-    # 1. Enrich from folder context (Owner, Manager, Team, Email)
     analysis_data['Owner'] = member_name
     manager_info = manager_map.get(member_name, {})
     analysis_data['Manager'] = manager_info.get('Manager', '')
     analysis_data['Team'] = manager_info.get('Team', '')
     analysis_data['Email Id'] = manager_info.get('Email', '')
 
-    # 2. Enrich from file metadata (Media Link, Duration)
     analysis_data['Media Link'] = file_meta.get('webViewLink', '')
     if duration_seconds:
         analysis_data['Meeting duration (min)'] = f"{duration_seconds / 60:.2f}"
 
-    # 3. Enrich from filename patterns if AI analysis is empty
-    # Pattern: "Kibana ID | Meeting Type | City | Product"
     pipe_parts = [p.strip() for p in file_name.split('|')]
     if len(pipe_parts) == 4 and re.match(r'8[a-f0-9]{31}', pipe_parts[0], re.IGNORECASE):
-        analysis_data['Kibana ID'] = analysis_data.get('Kibana ID') or pipe_parts[0]
-        analysis_data['Meeting Type'] = analysis_data.get('Meeting Type') or pipe_parts[1]
-        analysis_data['Team'] = pipe_parts[2] # Filename city overrides folder city
-        analysis_data['Product Pitch'] = analysis_data.get('Product Pitch') or pipe_parts[3]
+        if not analysis_data.get('Kibana ID'): analysis_data['Kibana ID'] = pipe_parts[0]
+        if not analysis_data.get('Meeting Type'): analysis_data['Meeting Type'] = pipe_parts[1]
+        analysis_data['Team'] = pipe_parts[2]
+        if not analysis_data.get('Product Pitch'): analysis_data['Product Pitch'] = pipe_parts[3]
     else:
-        # Fallback to simpler regex parsing
         if not analysis_data.get('Kibana ID'):
             kibana_match = re.search(r'(8[a-f0-9]{31})', file_name, re.IGNORECASE)
-            if kibana_match:
-                analysis_data['Kibana ID'] = kibana_match.group(1)
+            if kibana_match: analysis_data['Kibana ID'] = kibana_match.group(1)
 
         if not analysis_data.get('Date'):
             date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2}|\d{2}[-/]\d{2}[-/]\d{4})', file_name)
-            if date_match:
-                analysis_data['Date'] = date_match.group(0).replace('-', '/')
+            if date_match: analysis_data['Date'] = date_match.group(0).replace('-', '/')
 
         if not analysis_data.get('Meeting Type'):
             fn_lower = file_name.lower()
@@ -148,11 +138,9 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file_meta: D
             elif 'renewal' in fn_lower: analysis_data['Meeting Type'] = 'Renewal'
             
         if not analysis_data.get('Society Name'):
-            # Attempt to extract name before common keywords or delimiters
             name_part = re.split(r'[_|\- ]+(ASP|ERP|DEMO|FRESH|PAID|RENEWAL|\d{2}[-/]\d{2})', file_name, flags=re.IGNORECASE)
             if name_part and name_part[0]:
                 analysis_data['Society Name'] = name_part[0].strip().replace('_', ' ').replace('.', ' ')
 
     return analysis_data
-
 
