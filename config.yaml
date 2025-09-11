@@ -1,1 +1,104 @@
+# ===================================================================
+# CONFIGURATION FILE for Meeting Analysis Bot v3
+# ===================================================================
+
+# -------------------
+# Google Drive Folder IDs
+# -------------------
+google_drive:
+  # The main parent folder containing all city/team folders.
+  parent_folder_id: "YOUR_MAIN_TRACKER_FOLDER_ID_HERE"
+
+  # Folder where successfully analyzed files will be moved.
+  processed_folder_id: "YOUR_PROCESSED_FOLDER_ID_HERE"
+
+  # Folder for files that fail with an unrecoverable error.
+  quarantine_folder_id: "YOUR_QUARANTINE_FOLDER_ID_HERE"
+
+# -------------------
+# Google Sheets Configuration
+# -------------------
+google_sheets:
+  sheet_id: "YOUR_GOOGLE_SHEET_ID_HERE"
+  results_worksheet_name: "Analysis Results"
+  ledger_worksheet_name: "Processed Ledger"
+
+# -------------------
+# Team and Manager Mapping
+# -------------------
+manager_map:
+  Sripal: { Manager: "Saleem", Team: "Chennai", Email: "sripal.r@nobroker.in" }
+  Sharath: { Manager: "Saleem", Team: "Bangalore", Email: "sharath.k@nobroker.in" }
+  Tavish: { Manager: "Saleem", Team: "Bangalore", Email: "tavish.thammaiah@nobroker.in" }
+  Aditya: { Manager: "Dipesh", Team: "Pune", Email: "aditya.singh2@nobroker.in" }
+  Akshay: { Manager: "Dipesh", Team: "Pune", Email: "akshay.anil@nobroker.in" }
+  Rahul: { Manager: "Dipesh", Team: "Pune", Email: "rahul.s@nobroker.in" }
+  Hemanth: { Manager: "Saleem", Team: "Hyderabad", Email: "jinukala.hemanth@nobroker.in" }
+  "Mohmed luqman": { Manager: "Saleem", Team: "Hyderabad", Email: "mohmed.luqman@nobroker.in" }
+  Pramod: { Manager: "Saleem", Team: "Hyderabad", Email: "pramod.ambadas@nobroker.in" }
+  Vishal: { Manager: "Dipesh", Team: "Navi Mumbai", Email: "vishal.shinde1@nobroker.in" }
+  Darshan: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "darshan.soni@nobroker.in" }
+  Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
+  Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
+  Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
+  Saleem: { Manager: "Self", Team: "Management", Email: "saleem@example.com" }
+
+# -------------------
+# Analysis Settings
+# -------------------
+analysis:
+  redact_pii: true
+  enable_diarization: false
+
+# -------------------
+# Gemini Prompt Template
+# -------------------
+gemini_prompt: |
+  ### ROLE AND GOAL ###
+  You are an expert sales meeting analyst for our company. Your goal is to meticulously analyze a sales meeting transcript, score the performance of the sales representative '{owner_name}', and extract key business information.
+
+  ### CONTEXT: PRODUCT AND PRICING INFORMATION ###
+  ---
+  **Product 1: ERP (Enterprise Resource Planning)**
+  This is our self-service software solution. Pricing: ₹12 + 18% GST per flat, per month.
+  Key Features: Full Tally integration, e-invoicing, bank reconciliation, vendor accounting, budgeting, 350+ bill combinations, purchase order approval, asset management with QR codes.
+
+  **Product 2: ASP (Accounting Services as a Product)**
+  This is a managed service where we handle accounting for the client. Pricing: ₹22.5 + 18% GST per flat, per month.
+  Key Features: A dedicated accountant, computerized billing, book-keeping, bank reconciliation, audit assistance.
+  ---
+
+  ### SCORING RUBRIC AND JUSTIFICATION ###
+  ---
+  - **Opening Pitch Score (1-10):** How well did the rep build rapport and state a clear agenda?
+  - **Product Pitch Score (1-10):** How well were the relevant product features (ERP vs. ASP) explained and linked to customer needs?
+  - **Closing Effectiveness (1-10):** How strong was the attempt to close the deal or define clear, committed next steps?
+  ---
+  **CRITICAL INSTRUCTION:** For any score of 6 or below, you MUST provide a concise, actionable reason in the "Suggestions & Missed Topics" column. Prefix the reason with the metric name. Example: "Closing Effectiveness: The rep failed to ask for the sale or establish a follow-up date."
+
+  ### TASK ###
+  Analyze the provided transcript based on the context and rubric. Extract the data points requested in the JSON format below. If a value isn't mentioned, return a blank string "".
+
+  ### INPUT: MEETING TRANSCRIPT ###
+  ---
+  {transcript}
+  ---
+
+  ### REQUIRED JSON OUTPUT FORMAT ###
+  {{
+      "Date": "", "POC Name": "", "Society Name": "", "Visit Type": "",
+      "Meeting Type": "", "Amount Value": "", "Months": "", "Deal Status": "",
+      "Vendor Leads": "", "Society Leads": "", "Opening Pitch Score": "", "Product Pitch Score": "",
+      "Cross-Sell / Opportunity Handling": "", "Closing Effectiveness": "", "Negotiation Strength": "",
+      "Overall Sentiment": "", "Total Score": "", "% Score": "", "Risks / Unresolved Issues": "",
+      "Improvements Needed": "", "Owner": "{owner_name}", "Email Id": "", "Kibana ID": "",
+      "Manager": "", "Product Pitch": "", "Team": "", "Media Link": "", "Doc Link": "",
+      "Suggestions & Missed Topics": "", "Pre-meeting brief": "", "Meeting duration (min)": "",
+      "Rebuttal Handling": "", "Rapport Building": "", "Improvement Areas": "",
+      "Product Knowledge Displayed": "", "Call Effectiveness and Control": "", "Next Step Clarity and Commitment": "",
+      "Missed Opportunities": "", "Key Discussion Points": "", "Key Questions": "", "Competition Discussion": "",
+      "Action items": "", "Positive Factors": "", "Negative Factors": "", "Customer Needs": "",
+      "Overall Client Sentiment": "", "Feature Checklist Coverage": ""
+  }}
+
 
