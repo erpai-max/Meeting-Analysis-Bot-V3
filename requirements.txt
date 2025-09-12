@@ -8,9 +8,10 @@ google-cloud-bigquery
 google-generativeai
 faster-whisper
 pyannote.audio
+torch # Required for pyannote.audio
 
 # Utilities
 pyyaml
 tenacity
-slack_sdk
+requests # For Slack/Email notifications
 
