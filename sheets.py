@@ -1,8 +1,10 @@
 import logging
 import time
-from typing import Dict, Set
+from typing import Dict, Set, List, Any
 
 import gspread
+from google.cloud import bigquery
+from google.cloud.exceptions import NotFound
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # =======================
@@ -57,7 +59,7 @@ def get_processed_file_ids(gsheets_client: gspread.Client, config: Dict) -> Set[
         raise
 
 @retry(**RETRY_CONFIG)
-def write_results(gsheets_client: gspread.Client, data: Dict[str, str], config: Dict):
+def write_results(gsheets_client: gspread.Client, data: Dict[str, Any], config: Dict):
     """Writes the analysis results to the main results tab."""
     try:
         logging.info("Attempting to write data to Google Sheets...")
@@ -78,7 +80,9 @@ def write_results(gsheets_client: gspread.Client, data: Dict[str, str], config: 
             worksheet.append_row(DEFAULT_HEADERS, value_input_option="USER_ENTERED")
             headers = DEFAULT_HEADERS
 
-        row_to_insert = [data.get(header, "") for header in headers]
+        flat_data = {k: v for k, v in data.items() if isinstance(v, (str, int, float, bool)) or v is None}
+        row_to_insert = [str(flat_data.get(header, "")) for header in headers]
+        
         worksheet.append_row(row_to_insert, value_input_option="USER_ENTERED")
         logging.info(f"SUCCESS: Data for '{data.get('Society Name', '')}' written to Google Sheets.")
     except Exception as e:
@@ -102,4 +106,41 @@ def update_ledger(gsheets_client: gspread.Client, file_id: str, status: str, err
     except Exception as e:
         logging.error(f"ERROR: Failed to update ledger: {e}")
         raise
+
+# =======================
+# BigQuery Operations
+# =======================
+@retry(**RETRY_CONFIG)
+def stream_to_bigquery(bq_client: bigquery.Client, data: Dict[str, Any], config: Dict):
+    """Streams a single record to the BigQuery table."""
+    try:
+        project_id = config['google_bigquery']['project_id']
+        dataset_id = config['google_bigquery']['dataset_id']
+        table_id = config['google_bigquery']['table_id']
+        table_ref = f"{project_id}.{dataset_id}.{table_id}"
+        
+        headers = config.get('sheets_headers', DEFAULT_HEADERS)
+        bq_record = {header.replace(" ", "_").replace("/", "_"): str(val) for header, val in data.items() if header in headers}
+        
+        errors = bq_client.insert_rows_json(table_ref, [bq_record])
+        if errors:
+            logging.error(f"Encountered errors while streaming to BigQuery: {errors}")
+        else:
+            logging.info(f"Successfully streamed record for '{data.get('Society Name', '')}' to BigQuery.")
+    except Exception as e:
+        logging.error(f"ERROR: Failed to stream data to BigQuery: {e}")
+        raise
+
+def get_all_results(gsheets_client: gspread.Client, config: Dict) -> List[Dict]:
+    """Fetches all records from the results tab for the dashboard export."""
+    logging.info("Fetching all records from Google Sheet for dashboard export...")
+    try:
+        sheet_id = config['google_sheets']['sheet_id']
+        results_tab_name = config['google_sheets']['results_tab_name']
+        spreadsheet = gsheets_client.open_by_key(sheet_id)
+        worksheet = spreadsheet.worksheet(results_tab_name)
+        return worksheet.get_all_records()
+    except Exception as e:
+        logging.error(f"Could not fetch all results from sheet: {e}")
+        return []
 
