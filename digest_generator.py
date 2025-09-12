@@ -15,12 +15,13 @@ import requests
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # =======================
-# NEW: BigQuery Setup Function
+# BigQuery Setup Function (Upgraded)
 # =======================
 def ensure_bigquery_schema(client: bigquery.Client, project_id: str, dataset_id: str, table_id: str, schema_fields: List[str]):
-    """Checks if the dataset and table exist in BigQuery, and creates them if they don't."""
+    """Checks if the dataset and table exist and have a schema, creating or updating them if necessary."""
     dataset_ref = f"{project_id}.{dataset_id}"
-    table_ref = f"{dataset_ref}.{table_id}"
+    table_ref_str = f"{dataset_ref}.{table_id}"
+    table_ref = bigquery.TableReference.from_string(table_ref_str)
 
     try:
         client.get_dataset(dataset_ref)
@@ -32,30 +33,37 @@ def ensure_bigquery_schema(client: bigquery.Client, project_id: str, dataset_id:
         logging.info(f"Successfully created dataset '{dataset_ref}'.")
 
     try:
-        client.get_table(table_ref)
-        logging.info(f"BigQuery table '{table_ref}' already exists.")
+        table = client.get_table(table_ref)
+        logging.info(f"BigQuery table '{table_ref_str}' already exists.")
+        # NEW: Check if the existing table has a schema. If not, update it.
+        if not table.schema:
+            logging.warning(f"Table '{table_ref_str}' exists but has no schema. Updating it.")
+            table.schema = [bigquery.SchemaField(name.replace(" ", "_"), "STRING") for name in schema_fields]
+            client.update_table(table, ["schema"])
+            logging.info(f"Successfully added schema to table '{table_ref_str}'.")
+
     except NotFound:
-        logging.warning(f"BigQuery table '{table_ref}' not found. Creating it with default schema...")
-        schema = [bigquery.SchemaField(name, "STRING") for name in schema_fields]
+        logging.warning(f"BigQuery table '{table_ref_str}' not found. Creating it with schema...")
+        schema = [bigquery.SchemaField(name.replace(" ", "_"), "STRING") for name in schema_fields]
         table = bigquery.Table(table_ref, schema=schema)
         client.create_table(table, timeout=30)
-        logging.info(f"Successfully created table '{table_ref}'.")
+        logging.info(f"Successfully created table '{table_ref_str}'.")
 
 # =======================
 # Query Functions
 # =======================
 def get_weekly_summary(bq_client: bigquery.Client, table_ref: str) -> str:
     """Generates a high-level summary of the week's meetings."""
-    # This query now safely handles NULL values by filtering them out.
+    # This query now safely handles NULL or empty string values.
     query = f"""
         SELECT
             Team,
             COUNT(DISTINCT Owner) AS active_reps,
             COUNT(*) AS total_meetings,
-            AVG(CAST(NULLIF(Percent_Score, '') AS NUMERIC)) AS avg_score,
-            SUM(CAST(NULLIF(Amount_Value, '') AS NUMERIC)) AS total_deal_value
+            AVG(CAST(NULLIF(TRIM(Percent_Score), '') AS NUMERIC)) AS avg_score,
+            SUM(CAST(NULLIF(TRIM(Amount_Value), '') AS NUMERIC)) AS total_deal_value
         FROM `{table_ref}`
-        WHERE DATETIME(TIMESTAMP(Date)) >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
+        WHERE SAFE.PARSE_DATETIME('%Y/%m/%d', Date) >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
         GROUP BY Team
         ORDER BY total_meetings DESC;
     """
@@ -85,11 +93,11 @@ def get_coaching_opportunities(bq_client: bigquery.Client, table_ref: str) -> st
         SELECT
             Owner,
             Team,
-            AVG(CAST(NULLIF(Opening_Pitch_Score, '') AS NUMERIC)) as avg_opening,
-            AVG(CAST(NULLIF(Product_Pitch_Score, '') AS NUMERIC)) as avg_product,
-            AVG(CAST(NULLIF(Closing_Effectiveness, '') AS NUMERIC)) as avg_closing
+            AVG(CAST(NULLIF(TRIM(Opening_Pitch_Score), '') AS NUMERIC)) as avg_opening,
+            AVG(CAST(NULLIF(TRIM(Product_Pitch_Score), '') AS NUMERIC)) as avg_product,
+            AVG(CAST(NULLIF(TRIM(Closing_Effectiveness), '') AS NUMERIC)) as avg_closing
         FROM `{table_ref}`
-        WHERE DATETIME(TIMESTAMP(Date)) >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
+        WHERE SAFE.PARSE_DATETIME('%Y/%m/%d', Date) >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
         GROUP BY Owner, Team
         HAVING avg_opening < 7 OR avg_product < 7 OR avg_closing < 7
         ORDER BY Team, Owner;
@@ -103,7 +111,7 @@ def get_coaching_opportunities(bq_client: bigquery.Client, table_ref: str) -> st
 
         coaching = "\n\n*💡 Coaching Opportunities 💡*\n_Reps with average scores below 7 this week._\n\n"
         for row in results:
-            coaching += f"*{row.Owner}* ({row.Team}):\n"
+            coaching += f"*{row.Owner}* ({row.Team or 'N/A'}):\n"
             if row.avg_opening and row.avg_opening < 7: coaching += f"  - Opening Pitch: `{row.avg_opening:.1f}`\n"
             if row.avg_product and row.avg_product < 7: coaching += f"  - Product Pitch: `{row.avg_product:.1f}`\n"
             if row.avg_closing and row.avg_closing < 7: coaching += f"  - Closing: `{row.avg_closing:.1f}`\n"
@@ -167,7 +175,7 @@ def main():
     dataset_id = config['google_bigquery']['dataset_id']
     table_id = config['google_bigquery']['table_id']
     
-    # NEW: Ensure schema exists before querying
+    # Ensure schema exists before querying
     schema_fields = config.get('sheets_headers', [])
     ensure_bigquery_schema(client, project_id, dataset_id, table_id, schema_fields)
     
