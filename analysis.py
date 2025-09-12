@@ -49,7 +49,7 @@ def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config:
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
 # =======================
-# Data Normalization
+# Data Normalization (Upgraded)
 # =======================
 SIX_CORE = [
     "Opening Pitch Score",
@@ -71,7 +71,7 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
-    # Create a new dictionary with cleaned keys (removes spaces/newlines)
+    # THIS IS THE FIX: Create a new dictionary with cleaned keys (removes spaces/newlines)
     cleaned_rec = {str(k).strip(): v for k, v in rec.items()}
 
     # Recompute Total and % Score for consistency
@@ -79,21 +79,21 @@ def normalize_record(rec: Dict):
     valid_nums = [n for n in nums if n is not None]
     if len(valid_nums) > 0:
         avg = sum(valid_nums) / len(valid_nums)
-        rec["Total Score"] = str(Decimal(avg).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
-        rec["% Score"] = str(int(round(avg * 10)))
+        cleaned_rec["Total Score"] = str(Decimal(avg).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+        cleaned_rec["% Score"] = str(int(round(avg * 10)))
     else:
-        rec["Total Score"] = ""
-        rec["% Score"] = ""
+        cleaned_rec["Total Score"] = ""
+        cleaned_rec["% Score"] = ""
 
-    # Coerce sentiment enums to ensure they are valid or blank
+    # Coerce sentiment enums
     for k in ["Overall Sentiment", "Overall Client Sentiment"]:
-        if str(rec.get(k, "")).strip() not in ["Positive", "Neutral", "Negative"]:
-            rec[k] = ""
+        if str(cleaned_rec.get(k, "")).strip() not in ["Positive", "Neutral", "Negative"]:
+            cleaned_rec[k] = ""
 
-    # Ensure all final values are strings for Google Sheets compatibility
-    for k, v in rec.items():
+    # Ensure all final values are strings
+    for k, v in cleaned_rec.items():
         if isinstance(v, (int, float)):
-            rec[k] = str(v)
+            cleaned_rec[k] = str(v)
             
     return cleaned_rec
 
