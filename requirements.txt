@@ -2,13 +2,15 @@
 google-api-python-client
 google-auth-oauthlib
 gspread
+google-cloud-bigquery
 
 # AI & Transcription
 google-generativeai
 faster-whisper
+pyannote.audio
 
 # Utilities
 pyyaml
 tenacity
-
+slack_sdk
 
