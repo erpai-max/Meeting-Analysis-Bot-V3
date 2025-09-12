@@ -2,13 +2,17 @@ import os
 import yaml
 import logging
 import json
-import time  # Import the time library
-from typing import Dict, List
+from typing import Dict, List, Any
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from google.oauth2 import service_account
 from google.cloud import bigquery
-from google.cloud.exceptions import NotFound
-import requests
+import google.generativeai as genai
+
+# Import the new email formatter
+import email_formatter
 
 # =======================
 # Logging
@@ -16,144 +20,180 @@ import requests
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # =======================
-# BigQuery Setup Function (Upgraded)
+# Authentication
 # =======================
-def ensure_bigquery_schema(client: bigquery.Client, project_id: str, dataset_id: str, table_id: str, schema_fields: List[str]):
-    """Checks if the dataset and table exist and have a schema, creating or updating them if necessary."""
-    dataset_ref = f"{project_id}.{dataset_id}"
-    table_ref_str = f"{dataset_ref}.{table_id}"
-    table_ref = bigquery.TableReference.from_string(table_ref_str)
-
+def get_bigquery_client(config: Dict, gcp_key_str: str) -> bigquery.Client:
+    """Authenticates and returns a BigQuery client."""
     try:
-        client.get_dataset(dataset_ref)
-        logging.info(f"BigQuery dataset '{dataset_ref}' already exists.")
-    except NotFound:
-        logging.warning(f"BigQuery dataset '{dataset_ref}' not found. Creating it...")
-        dataset = bigquery.Dataset(dataset_ref)
-        client.create_dataset(dataset, timeout=30)
-        logging.info(f"Successfully created dataset '{dataset_ref}'.")
-
-    try:
-        table = client.get_table(table_ref)
-        logging.info(f"BigQuery table '{table_ref_str}' already exists.")
-        if not table.schema:
-            logging.warning(f"Table '{table_ref_str}' exists but has no schema. Updating it.")
-            table.schema = [bigquery.SchemaField(name.replace(" ", "_"), "STRING") for name in schema_fields]
-            client.update_table(table, ["schema"])
-            logging.info(f"Successfully added schema to table '{table_ref_str}'.")
-            # --- THIS IS THE FIX ---
-            logging.info("Pausing for 5 seconds to allow schema to propagate...")
-            time.sleep(5) # Add a 5-second pause
-
-    except NotFound:
-        logging.warning(f"BigQuery table '{table_ref_str}' not found. Creating it with schema...")
-        schema = [bigquery.SchemaField(name.replace(" ", "_"), "STRING") for name in schema_fields]
-        table = bigquery.Table(table_ref, schema=schema)
-        client.create_table(table, timeout=30)
-        logging.info(f"Successfully created table '{table_ref_str}'.")
-        # --- THIS IS THE FIX ---
-        logging.info("Pausing for 5 seconds to allow new table to be ready for queries...")
-        time.sleep(5) # Add a 5-second pause
-
+        creds_info = json.loads(gcp_key_str)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
+        project_id = config['google_bigquery']['project_id']
+        client = bigquery.Client(credentials=creds, project=project_id)
+        logging.info(f"SUCCESS: Authenticated with Google BigQuery for project '{project_id}'.")
+        return client
+    except Exception as e:
+        logging.error(f"CRITICAL: BigQuery client authentication failed: {e}")
+        raise
 
 # =======================
-# Query Functions
+# Data Fetching from BigQuery
 # =======================
-def get_weekly_summary(bq_client: bigquery.Client, table_ref: str) -> str:
-    """Generates a high-level summary of the week's meetings."""
+def fetch_manager_data(bq_client: bigquery.Client, table_ref: str, manager_name: str) -> List[Dict]:
+    """Fetches all performance data for a specific manager's team from the last 7 days."""
+    # This query now also fetches the score from the prior week for comparison
     query = f"""
+        WITH weekly_data AS (
+            SELECT
+                Owner, Team,
+                SAFE_CAST(NULLIF(TRIM(Percent_Score), '') AS NUMERIC) as Percent_Score,
+                SAFE_CAST(NULLIF(TRIM(Amount_Value), '') AS NUMERIC) as Amount_Value,
+                SAFE.PARSE_DATETIME('%Y/%m/%d', Date) as meeting_date
+            FROM `{table_ref}`
+            WHERE Manager = '{manager_name}'
+        ),
+        current_week AS (
+            SELECT * FROM weekly_data
+            WHERE meeting_date >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
+        ),
+        previous_week AS (
+            SELECT Owner, AVG(Percent_Score) as prev_week_avg_score
+            FROM weekly_data
+            WHERE meeting_date >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 14 DAY)
+              AND meeting_date < DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
+            GROUP BY Owner
+        )
         SELECT
-            Team,
-            COUNT(DISTINCT Owner) AS active_reps,
-            COUNT(*) AS total_meetings,
-            AVG(CAST(NULLIF(TRIM(Percent_Score), '') AS NUMERIC)) AS avg_score,
-            SUM(CAST(NULLIF(TRIM(Amount_Value), '') AS NUMERIC)) AS total_deal_value
-        FROM `{table_ref}`
-        WHERE SAFE.PARSE_DATETIME('%Y/%m/%d', Date) >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
-        GROUP BY Team
-        ORDER BY total_meetings DESC;
+            cw.Owner,
+            cw.Team,
+            cw.Percent_Score,
+            cw.Amount_Value,
+            pw.prev_week_avg_score
+        FROM current_week cw
+        LEFT JOIN previous_week pw ON cw.Owner = pw.Owner
     """
     try:
+        logging.info(f"Fetching data for manager: {manager_name}")
         query_job = bq_client.query(query)
-        results = query_job.result()
-        
-        if results.total_rows == 0:
-            return "No new meetings were analyzed this week."
-
-        summary = "*🏆 Weekly Performance Summary 🏆*\n\n"
-        for row in results:
-            summary += (
-                f"*{row.Team or 'Uncategorized'} Team:*\n"
-                f"  - Meetings: `{row.total_meetings}` by `{row.active_reps}` reps\n"
-                f"  - Avg Score: `{row.avg_score or 0:.1f}%`\n"
-                f"  - Potential Value Discussed: `₹{row.total_deal_value or 0:,.0f}`\n\n"
-            )
-        return summary
+        results = [dict(row) for row in query_job.result()]
+        logging.info(f"Found {len(results)} records for {manager_name}.")
+        return results
     except Exception as e:
-        logging.error(f"Could not generate weekly summary: {e}")
-        return "Could not generate weekly summary due to an error."
-
-def get_coaching_opportunities(bq_client: bigquery.Client, table_ref: str) -> str:
-    """Identifies reps and skills that need attention."""
-    query = f"""
-        SELECT
-            Owner,
-            Team,
-            AVG(CAST(NULLIF(TRIM(Opening_Pitch_Score), '') AS NUMERIC)) as avg_opening,
-            AVG(CAST(NULLIF(TRIM(Product_Pitch_Score), '') AS NUMERIC)) as avg_product,
-            AVG(CAST(NULLIF(TRIM(Closing_Effectiveness), '') AS NUMERIC)) as avg_closing
-        FROM `{table_ref}`
-        WHERE SAFE.PARSE_DATETIME('%Y/%m/%d', Date) >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
-        GROUP BY Owner, Team
-        HAVING avg_opening < 7 OR avg_product < 7 OR avg_closing < 7
-        ORDER BY Team, Owner;
-    """
-    try:
-        query_job = bq_client.query(query)
-        results = query_job.result()
-
-        if results.total_rows == 0:
-            return "" 
-
-        coaching = "\n\n*💡 Coaching Opportunities 💡*\n_Reps with average scores below 7 this week._\n\n"
-        for row in results:
-            coaching += f"*{row.Owner}* ({row.Team or 'N/A'}):\n"
-            if row.avg_opening and row.avg_opening < 7: coaching += f"  - Opening Pitch: `{row.avg_opening:.1f}`\n"
-            if row.avg_product and row.avg_product < 7: coaching += f"  - Product Pitch: `{row.avg_product:.1f}`\n"
-            if row.avg_closing and row.avg_closing < 7: coaching += f"  - Closing: `{row.avg_closing:.1f}`\n"
-        return coaching
-    except Exception as e:
-        logging.error(f"Could not generate coaching report: {e}")
-        return "\nCould not generate coaching report due to an error."
+        logging.error(f"Could not fetch data for manager {manager_name}: {e}")
+        return []
 
 # =======================
-# Notification Functions
+# Data Processing & Aggregation
 # =======================
-def send_slack_notification(message: str, config: Dict):
-    """Sends a formatted message to a Slack channel using a webhook."""
-    slack_webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List, List]:
+    """Aggregates raw data into KPIs, a team performance list, and coaching notes."""
+    total_meetings = len(team_records)
+    total_pipeline = sum(r['Amount_Value'] for r in team_records if r.get('Amount_Value'))
+    avg_score = sum(r['Percent_Score'] for r in team_records if r.get('Percent_Score')) / total_meetings if total_meetings > 0 else 0
+
+    kpis = {
+        "total_meetings": total_meetings,
+        "avg_score": avg_score,
+        "total_pipeline": total_pipeline
+    }
     
-    if not slack_webhook_url:
-        logging.warning("SLACK_WEBHOOK_URL not set. Skipping Slack notification.")
-        print("Final Message (would be sent to Slack):\n", message)
+    team_performance = []
+    reps = sorted(list(set(r['Owner'] for r in team_records)))
+    for rep in reps:
+        rep_meetings = [r for r in team_records if r['Owner'] == rep]
+        rep_avg_score = sum(r['Percent_Score'] for r in rep_meetings if r.get('Percent_Score')) / len(rep_meetings) if rep_meetings else 0
+        rep_pipeline = sum(r['Amount_Value'] for r in rep_meetings if r.get('Amount_Value'))
+        
+        prev_scores = [r['prev_week_avg_score'] for r in rep_meetings if r.get('prev_week_avg_score')]
+        avg_prev_score = sum(prev_scores) / len(prev_scores) if prev_scores else rep_avg_score
+        score_change = rep_avg_score - avg_prev_score
+
+        team_performance.append({
+            "owner": rep,
+            "meetings": len(rep_meetings),
+            "avg_score": rep_avg_score,
+            "pipeline": rep_pipeline,
+            "score_change": score_change
+        })
+    
+    # Placeholder for more advanced coaching note generation
+    coaching_notes = []
+
+    return kpis, sorted(team_performance, key=lambda x: x['avg_score'], reverse=True), coaching_notes
+
+
+# =======================
+# AI Summary Generation
+# =======================
+def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], config: Dict) -> str:
+    """Uses Gemini to generate a high-level executive summary."""
+    logging.info(f"Generating AI summary for {manager_name}...")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        logging.error("GEMINI_API_KEY not set. Cannot generate AI summary.")
+        return "AI summary could not be generated due to a configuration error."
+
+    genai.configure(api_key=gemini_key)
+    model = genai.GenerativeModel(config['analysis']['gemini_model'])
+
+    prompt = f"""
+    You are a senior sales analyst providing a weekly summary to a manager named {manager_name}.
+    Based on the following data for their team's performance over the last 7 days, write a concise, 2-3 sentence executive summary.
+    Focus on the most important trend, biggest success, or most critical area for improvement. Be direct and data-driven.
+
+    **Key KPIs:**
+    - Total Meetings: {kpis['total_meetings']}
+    - Team Average Score: {kpis['avg_score']:.1f}%
+    - Total Pipeline Value: {email_formatter.format_currency(kpis['total_pipeline'])}
+
+    **Individual Performance:**
+    {json.dumps(team_data, indent=2)}
+
+    **Your Summary:**
+    """
+    try:
+        response = model.generate_content(prompt)
+        logging.info("Successfully generated AI summary.")
+        return response.text
+    except Exception as e:
+        logging.error(f"Failed to generate AI summary: {e}")
+        return "An AI-powered summary could not be generated for this week's data."
+
+# =======================
+# Email Sending
+# =======================
+def send_email(subject: str, html_content: str, recipient: str):
+    """Sends the HTML report via email using secrets."""
+    sender_email = os.environ.get("MAIL_USERNAME")
+    password = os.environ.get("MAIL_PASSWORD")
+
+    if not sender_email or not password:
+        logging.warning("MAIL_USERNAME or MAIL_PASSWORD not set. Skipping actual email sending.")
+        print("\n--- WOULD SEND THIS EMAIL ---\n")
+        print(f"TO: {recipient}")
+        print(f"SUBJECT: {subject}")
+        # To avoid flooding the log, the HTML content is not printed by default
         return
 
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = sender_email
+    msg['To'] = recipient
+    msg.attach(MIMEText(html_content, 'html'))
+
     try:
-        response = requests.post(
-            slack_webhook_url,
-            json={"text": message},
-            headers={"Content-Type": "application/json"}
-        )
-        response.raise_for_status()
-        logging.info("Successfully sent weekly digest to Slack.")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"ERROR: Failed to send Slack message: {e}")
+        logging.info(f"Connecting to SMTP server to send email to {recipient}...")
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(sender_email, password)
+            server.sendmail(sender_email, recipient, msg.as_string())
+        logging.info("SUCCESS: Email sent.")
+    except Exception as e:
+        logging.error(f"ERROR: Failed to send email: {e}")
 
 # =======================
 # Main
 # =======================
 def main():
-    """Generates and sends the weekly digest."""
+    """Generates and sends the weekly digest reports to each manager."""
     logging.info("--- Starting Weekly Digest Generator ---")
     
     with open("config.yaml", "r") as f:
@@ -162,38 +202,36 @@ def main():
     if not config.get('weekly_digest', {}).get('enabled'):
         logging.info("Weekly digest is disabled in config.yaml. Exiting.")
         return
-
+        
     gcp_key_str = os.environ.get("GCP_SA_KEY")
-    if not gcp_key_str:
-        logging.error("CRITICAL: GCP_SA_KEY environment variable not found. Cannot authenticate.")
+    bq_client = get_bigquery_client(config, gcp_key_str)
+    
+    table_ref = f"{bq_client.project}.{config['google_bigquery']['dataset_id']}.{config['google_bigquery']['table_id']}"
+    
+    manager_emails = config.get('manager_emails', {})
+    if not manager_emails:
+        logging.warning("No managers defined in config.yaml. Nothing to do.")
         return
         
-    try:
-        creds_info = json.loads(gcp_key_str)
-        creds = service_account.Credentials.from_service_account_info(creds_info)
-        project_id = config['google_bigquery']['project_id']
-        client = bigquery.Client(credentials=creds, project=project_id)
-        logging.info(f"SUCCESS: Authenticated with Google BigQuery for project '{project_id}'.")
-    except Exception as e:
-        logging.error(f"CRITICAL: BigQuery client authentication failed: {e}")
-        return
+    for manager_name, manager_email in manager_emails.items():
+        logging.info(f"--- Generating report for {manager_name} ---")
+        
+        team_records = fetch_manager_data(bq_client, table_ref, manager_name)
+        
+        if not team_records:
+            logging.info(f"No new meeting data for {manager_name}'s team this week. Skipping report.")
+            continue
+            
+        kpis, team_data, coaching_notes = process_team_data(team_records)
+        ai_summary = generate_ai_summary(manager_name, kpis, team_data, config)
+        
+        email_html = email_formatter.create_manager_digest_email(
+            manager_name, kpis, team_data, coaching_notes, ai_summary
+        )
+        
+        subject = f"Your Team's Weekly Meeting Analysis Summary ({time.strftime('%b %d')})"
+        send_email(subject, email_html, manager_email)
 
-    dataset_id = config['google_bigquery']['dataset_id']
-    table_id = config['google_bigquery']['table_id']
-    
-    # Ensure schema exists before querying
-    schema_fields = config.get('sheets_headers', [])
-    ensure_bigquery_schema(client, project_id, dataset_id, table_id, schema_fields)
-    
-    table_ref = f"{project_id}.{dataset_id}.{table_id}"
-    
-    summary_report = get_weekly_summary(client, table_ref)
-    coaching_report = get_coaching_opportunities(client, table_ref)
-    
-    final_message = f"{summary_report}{coaching_report}"
-    
-    send_slack_notification(final_message, config)
-    
     logging.info("--- Weekly Digest Generator Finished ---")
 
 if __name__ == "__main__":
