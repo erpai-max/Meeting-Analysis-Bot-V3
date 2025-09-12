@@ -2,7 +2,7 @@ import os
 import yaml
 import logging
 from datetime import datetime, timedelta
-from typing import Dict # <- This is the missing import
+from typing import Dict
 
 from google.cloud import bigquery
 from slack_sdk import WebClient
