@@ -5,8 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict
 
 from google.cloud import bigquery
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
+import requests # Using requests is more reliable for webhooks
 
 # =======================
 # Logging
@@ -66,14 +65,14 @@ def get_coaching_opportunities(bq_client: bigquery.Client, table_ref: str) -> st
         results = query_job.result()
 
         if results.total_rows == 0:
-            return "" # No coaching opportunities to report
+            return "" 
 
         coaching = "\n\n*💡 Coaching Opportunities 💡*\n_Reps with average scores below 7 this week._\n\n"
         for row in results:
             coaching += f"*{row.Owner}* ({row.Team}):\n"
-            if row.avg_opening < 7: coaching += f"  - Opening Pitch: `{row.avg_opening:.1f}`\n"
-            if row.avg_product < 7: coaching += f"  - Product Pitch: `{row.avg_product:.1f}`\n"
-            if row.avg_closing < 7: coaching += f"  - Closing: `{row.avg_closing:.1f}`\n"
+            if row.avg_opening and row.avg_opening < 7: coaching += f"  - Opening Pitch: `{row.avg_opening:.1f}`\n"
+            if row.avg_product and row.avg_product < 7: coaching += f"  - Product Pitch: `{row.avg_product:.1f}`\n"
+            if row.avg_closing and row.avg_closing < 7: coaching += f"  - Closing: `{row.avg_closing:.1f}`\n"
         return coaching
     except Exception as e:
         return f"\nCould not generate coaching report: {e}"
@@ -82,24 +81,24 @@ def get_coaching_opportunities(bq_client: bigquery.Client, table_ref: str) -> st
 # Notification Functions
 # =======================
 def send_slack_notification(message: str, config: Dict):
-    """Sends a formatted message to a Slack channel."""
+    """Sends a formatted message to a Slack channel using a webhook."""
     slack_webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
-    channel = config['weekly_digest']['slack_channel']
     
     if not slack_webhook_url:
         logging.warning("SLACK_WEBHOOK_URL not set. Skipping Slack notification.")
+        print("Final Message (would be sent to Slack):\n", message)
         return
 
     try:
-        # NOTE: Using WebClient with a webhook URL is not standard.
-        # This is a simplified example. A real implementation would use a bot token.
-        # For webhook URLs, you would typically use the `requests` library.
-        # This is a conceptual placeholder.
-        client = WebClient(token="") # A bot token would normally go here.
-        client.chat_postMessage(channel=channel, text=message)
-        logging.info(f"Successfully sent weekly digest to Slack channel {channel}.")
-    except SlackApiError as e:
-        logging.error(f"ERROR: Failed to send Slack message: {e.response['error']}")
+        response = requests.post(
+            slack_webhook_url,
+            json={"text": message},
+            headers={"Content-Type": "application/json"}
+        )
+        response.raise_for_status() # Raises an exception for bad status codes (4xx or 5xx)
+        logging.info("Successfully sent weekly digest to Slack.")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"ERROR: Failed to send Slack message: {e}")
     except Exception as e:
         logging.error(f"An unexpected error occurred with Slack: {e}")
 
@@ -131,7 +130,11 @@ def main():
     final_message = f"{summary_report}{coaching_report}"
     
     send_slack_notification(final_message, config)
+    
+    logging.info("--- Weekly Digest Generator Finished ---")
 
 if __name__ == "__main__":
     main()
+
+
 
