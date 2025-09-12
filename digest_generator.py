@@ -1,11 +1,13 @@
 import os
 import yaml
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import Dict
 
+from google.oauth2 import service_account
 from google.cloud import bigquery
-import requests # Using requests is more reliable for webhooks
+import requests
 
 # =======================
 # Logging
@@ -95,7 +97,7 @@ def send_slack_notification(message: str, config: Dict):
             json={"text": message},
             headers={"Content-Type": "application/json"}
         )
-        response.raise_for_status() # Raises an exception for bad status codes (4xx or 5xx)
+        response.raise_for_status()
         logging.info("Successfully sent weekly digest to Slack.")
     except requests.exceptions.RequestException as e:
         logging.error(f"ERROR: Failed to send Slack message: {e}")
@@ -117,13 +119,27 @@ def main():
         logging.info("Weekly digest is disabled in config.yaml. Exiting.")
         return
 
-    project_id = config['google_bigquery']['project_id']
+    # --- THIS IS THE CORRECTED AUTHENTICATION BLOCK ---
+    gcp_key_str = os.environ.get("GCP_SA_KEY")
+    if not gcp_key_str:
+        logging.error("CRITICAL: GCP_SA_KEY environment variable not found. Cannot authenticate.")
+        return
+        
+    try:
+        creds_info = json.loads(gcp_key_str)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
+        project_id_from_key = creds.project_id
+        client = bigquery.Client(credentials=creds, project=project_id_from_key)
+        logging.info(f"SUCCESS: Authenticated with Google BigQuery for project '{project_id_from_key}'.")
+    except Exception as e:
+        logging.error(f"CRITICAL: BigQuery client authentication failed: {e}")
+        return
+    # --- END OF CORRECTION ---
+
     dataset_id = config['google_bigquery']['dataset_id']
     table_id = config['google_bigquery']['table_id']
-    table_ref = f"{project_id}.{dataset_id}.{table_id}"
+    table_ref = f"{project_id_from_key}.{dataset_id}.{table_id}"
     
-    client = bigquery.Client()
-
     summary_report = get_weekly_summary(client, table_ref)
     coaching_report = get_coaching_opportunities(client, table_ref)
     
@@ -135,6 +151,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
