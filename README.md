@@ -1,4 +1,4 @@
-Meeting Analysis Bot - V4
+Meeting Analysis Bot - V.3
 This repository contains the code for a sophisticated, fully automated meeting analysis platform. The system leverages Google Drive, GitHub Actions, Google's Gemini AI, and Google BigQuery to create a robust pipeline that processes audio/video meeting recordings and transforms them into actionable business intelligence.
 
 Key Features
