@@ -114,8 +114,11 @@ def create_manager_digest_email(manager_name: str, kpis: Dict[str, Any], team_da
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Weekly Meeting Analysis Summary</title>
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        </style>
     </head>
-    <body style="font-family: Inter, sans-serif; background-color: #f3f4f6; margin: 0; padding: 20px;">
+    <body style="font-family: 'Inter', sans-serif; background-color: #f3f4f6; margin: 0; padding: 20px;">
         <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
             <tr>
                 <td>
