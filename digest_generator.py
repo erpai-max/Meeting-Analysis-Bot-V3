@@ -2,6 +2,7 @@ import os
 import yaml
 import logging
 import json
+import time  # Import the time library
 from typing import Dict, List
 
 from google.oauth2 import service_account
@@ -35,12 +36,14 @@ def ensure_bigquery_schema(client: bigquery.Client, project_id: str, dataset_id:
     try:
         table = client.get_table(table_ref)
         logging.info(f"BigQuery table '{table_ref_str}' already exists.")
-        # NEW: Check if the existing table has a schema. If not, update it.
         if not table.schema:
             logging.warning(f"Table '{table_ref_str}' exists but has no schema. Updating it.")
             table.schema = [bigquery.SchemaField(name.replace(" ", "_"), "STRING") for name in schema_fields]
             client.update_table(table, ["schema"])
             logging.info(f"Successfully added schema to table '{table_ref_str}'.")
+            # --- THIS IS THE FIX ---
+            logging.info("Pausing for 5 seconds to allow schema to propagate...")
+            time.sleep(5) # Add a 5-second pause
 
     except NotFound:
         logging.warning(f"BigQuery table '{table_ref_str}' not found. Creating it with schema...")
@@ -48,13 +51,16 @@ def ensure_bigquery_schema(client: bigquery.Client, project_id: str, dataset_id:
         table = bigquery.Table(table_ref, schema=schema)
         client.create_table(table, timeout=30)
         logging.info(f"Successfully created table '{table_ref_str}'.")
+        # --- THIS IS THE FIX ---
+        logging.info("Pausing for 5 seconds to allow new table to be ready for queries...")
+        time.sleep(5) # Add a 5-second pause
+
 
 # =======================
 # Query Functions
 # =======================
 def get_weekly_summary(bq_client: bigquery.Client, table_ref: str) -> str:
     """Generates a high-level summary of the week's meetings."""
-    # This query now safely handles NULL or empty string values.
     query = f"""
         SELECT
             Team,
