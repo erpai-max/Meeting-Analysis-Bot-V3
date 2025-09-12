@@ -2,11 +2,11 @@ import os
 import yaml
 import logging
 import json
-from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, List
 
 from google.oauth2 import service_account
 from google.cloud import bigquery
+from google.cloud.exceptions import NotFound
 import requests
 
 # =======================
@@ -15,17 +15,45 @@ import requests
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # =======================
+# NEW: BigQuery Setup Function
+# =======================
+def ensure_bigquery_schema(client: bigquery.Client, project_id: str, dataset_id: str, table_id: str, schema_fields: List[str]):
+    """Checks if the dataset and table exist in BigQuery, and creates them if they don't."""
+    dataset_ref = f"{project_id}.{dataset_id}"
+    table_ref = f"{dataset_ref}.{table_id}"
+
+    try:
+        client.get_dataset(dataset_ref)
+        logging.info(f"BigQuery dataset '{dataset_ref}' already exists.")
+    except NotFound:
+        logging.warning(f"BigQuery dataset '{dataset_ref}' not found. Creating it...")
+        dataset = bigquery.Dataset(dataset_ref)
+        client.create_dataset(dataset, timeout=30)
+        logging.info(f"Successfully created dataset '{dataset_ref}'.")
+
+    try:
+        client.get_table(table_ref)
+        logging.info(f"BigQuery table '{table_ref}' already exists.")
+    except NotFound:
+        logging.warning(f"BigQuery table '{table_ref}' not found. Creating it with default schema...")
+        schema = [bigquery.SchemaField(name, "STRING") for name in schema_fields]
+        table = bigquery.Table(table_ref, schema=schema)
+        client.create_table(table, timeout=30)
+        logging.info(f"Successfully created table '{table_ref}'.")
+
+# =======================
 # Query Functions
 # =======================
 def get_weekly_summary(bq_client: bigquery.Client, table_ref: str) -> str:
     """Generates a high-level summary of the week's meetings."""
+    # This query now safely handles NULL values by filtering them out.
     query = f"""
         SELECT
             Team,
             COUNT(DISTINCT Owner) AS active_reps,
             COUNT(*) AS total_meetings,
-            AVG(CAST(Percent_Score AS NUMERIC)) AS avg_score,
-            SUM(CAST(Amount_Value AS NUMERIC)) AS total_deal_value
+            AVG(CAST(NULLIF(Percent_Score, '') AS NUMERIC)) AS avg_score,
+            SUM(CAST(NULLIF(Amount_Value, '') AS NUMERIC)) AS total_deal_value
         FROM `{table_ref}`
         WHERE DATETIME(TIMESTAMP(Date)) >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
         GROUP BY Team
@@ -35,17 +63,21 @@ def get_weekly_summary(bq_client: bigquery.Client, table_ref: str) -> str:
         query_job = bq_client.query(query)
         results = query_job.result()
         
+        if results.total_rows == 0:
+            return "No new meetings were analyzed this week."
+
         summary = "*🏆 Weekly Performance Summary 🏆*\n\n"
         for row in results:
             summary += (
-                f"*{row.Team} Team:*\n"
+                f"*{row.Team or 'Uncategorized'} Team:*\n"
                 f"  - Meetings: `{row.total_meetings}` by `{row.active_reps}` reps\n"
-                f"  - Avg Score: `{row.avg_score:.2f}%`\n"
-                f"  - Potential Value Discussed: `₹{row.total_deal_value:,.2f}`\n\n"
+                f"  - Avg Score: `{row.avg_score or 0:.1f}%`\n"
+                f"  - Potential Value Discussed: `₹{row.total_deal_value or 0:,.0f}`\n\n"
             )
-        return summary if results.total_rows > 0 else "No new meetings were analyzed this week."
+        return summary
     except Exception as e:
-        return f"Could not generate weekly summary: {e}"
+        logging.error(f"Could not generate weekly summary: {e}")
+        return "Could not generate weekly summary due to an error."
 
 def get_coaching_opportunities(bq_client: bigquery.Client, table_ref: str) -> str:
     """Identifies reps and skills that need attention."""
@@ -53,9 +85,9 @@ def get_coaching_opportunities(bq_client: bigquery.Client, table_ref: str) -> st
         SELECT
             Owner,
             Team,
-            AVG(CAST(Opening_Pitch_Score AS NUMERIC)) as avg_opening,
-            AVG(CAST(Product_Pitch_Score AS NUMERIC)) as avg_product,
-            AVG(CAST(Closing_Effectiveness AS NUMERIC)) as avg_closing
+            AVG(CAST(NULLIF(Opening_Pitch_Score, '') AS NUMERIC)) as avg_opening,
+            AVG(CAST(NULLIF(Product_Pitch_Score, '') AS NUMERIC)) as avg_product,
+            AVG(CAST(NULLIF(Closing_Effectiveness, '') AS NUMERIC)) as avg_closing
         FROM `{table_ref}`
         WHERE DATETIME(TIMESTAMP(Date)) >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
         GROUP BY Owner, Team
@@ -77,7 +109,8 @@ def get_coaching_opportunities(bq_client: bigquery.Client, table_ref: str) -> st
             if row.avg_closing and row.avg_closing < 7: coaching += f"  - Closing: `{row.avg_closing:.1f}`\n"
         return coaching
     except Exception as e:
-        return f"\nCould not generate coaching report: {e}"
+        logging.error(f"Could not generate coaching report: {e}")
+        return "\nCould not generate coaching report due to an error."
 
 # =======================
 # Notification Functions
@@ -101,9 +134,6 @@ def send_slack_notification(message: str, config: Dict):
         logging.info("Successfully sent weekly digest to Slack.")
     except requests.exceptions.RequestException as e:
         logging.error(f"ERROR: Failed to send Slack message: {e}")
-    except Exception as e:
-        logging.error(f"An unexpected error occurred with Slack: {e}")
-
 
 # =======================
 # Main
@@ -119,7 +149,6 @@ def main():
         logging.info("Weekly digest is disabled in config.yaml. Exiting.")
         return
 
-    # --- THIS IS THE CORRECTED AUTHENTICATION BLOCK ---
     gcp_key_str = os.environ.get("GCP_SA_KEY")
     if not gcp_key_str:
         logging.error("CRITICAL: GCP_SA_KEY environment variable not found. Cannot authenticate.")
@@ -128,17 +157,21 @@ def main():
     try:
         creds_info = json.loads(gcp_key_str)
         creds = service_account.Credentials.from_service_account_info(creds_info)
-        project_id_from_key = creds.project_id
-        client = bigquery.Client(credentials=creds, project=project_id_from_key)
-        logging.info(f"SUCCESS: Authenticated with Google BigQuery for project '{project_id_from_key}'.")
+        project_id = config['google_bigquery']['project_id']
+        client = bigquery.Client(credentials=creds, project=project_id)
+        logging.info(f"SUCCESS: Authenticated with Google BigQuery for project '{project_id}'.")
     except Exception as e:
         logging.error(f"CRITICAL: BigQuery client authentication failed: {e}")
         return
-    # --- END OF CORRECTION ---
 
     dataset_id = config['google_bigquery']['dataset_id']
     table_id = config['google_bigquery']['table_id']
-    table_ref = f"{project_id_from_key}.{dataset_id}.{table_id}"
+    
+    # NEW: Ensure schema exists before querying
+    schema_fields = config.get('sheets_headers', [])
+    ensure_bigquery_schema(client, project_id, dataset_id, table_id, schema_fields)
+    
+    table_ref = f"{project_id}.{dataset_id}.{table_id}"
     
     summary_report = get_weekly_summary(client, table_ref)
     coaching_report = get_coaching_opportunities(client, table_ref)
