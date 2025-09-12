@@ -71,8 +71,11 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
+    # Create a new dictionary with cleaned keys (removes spaces/newlines)
+    cleaned_rec = {str(k).strip(): v for k, v in rec.items()}
+
     # Recompute Total and % Score for consistency
-    nums = [_to_num(rec.get(k, "")) for k in SIX_CORE]
+    nums = [_to_num(cleaned_rec.get(k, "")) for k in SIX_CORE]
     valid_nums = [n for n in nums if n is not None]
     if len(valid_nums) > 0:
         avg = sum(valid_nums) / len(valid_nums)
@@ -92,7 +95,7 @@ def normalize_record(rec: Dict):
         if isinstance(v, (int, float)):
             rec[k] = str(v)
             
-    return rec
+    return cleaned_rec
 
 # =======================
 # Gemini Analysis
@@ -118,7 +121,10 @@ def analyze_transcript(transcript: str, owner_name: str, config: Dict):
     try:
         model = genai.GenerativeModel(config['analysis']['gemini_model'])
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        raw_json = json.loads(response.text)
+        
+        # Clean the raw text before parsing, just in case
+        clean_json_string = response.text.replace('```json', '').replace('```', '').strip()
+        raw_json = json.loads(clean_json_string)
         
         normalized_data = normalize_record(raw_json)
         
@@ -142,7 +148,7 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, 
     manager_map = config.get('manager_map', {})
     manager_emails = config.get('manager_emails', {})
 
-    # 1. Enrich from folder context (This includes the logic you asked about)
+    # 1. Enrich from folder context
     analysis_data['Owner'] = member_name
     manager_info = manager_map.get(member_name, {})
     manager_name = manager_info.get('Manager', '')
