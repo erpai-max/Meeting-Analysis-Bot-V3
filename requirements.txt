@@ -7,11 +7,14 @@ google-cloud-bigquery
 # AI & Transcription
 google-generativeai
 faster-whisper
-pyannote.audio
-torch # Required for pyannote.audio
+openai # For OpenRouter failover
+
+# Optional: Uncomment the two lines below if you enable diarization in config.yaml
+# pyannote.audio
+# torch
 
 # Utilities
 pyyaml
 tenacity
-requests # For Slack/Email notifications
+requests # For email/Slack notifications
 
