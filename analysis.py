@@ -49,7 +49,7 @@ def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config:
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
 # =======================
-# Data Normalization
+# Data Normalization (Upgraded)
 # =======================
 SIX_CORE = [
     "Opening Pitch Score",
@@ -71,7 +71,7 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
-    # Clean keys by stripping whitespace and newlines
+    # THIS IS THE FIX: Create a new dictionary with cleaned keys (removes spaces/newlines)
     cleaned_rec = {str(k).strip(): v for k, v in rec.items()}
 
     # Recompute Total and % Score for consistency
@@ -122,6 +122,7 @@ def analyze_transcript(transcript: str, owner_name: str, config: Dict):
         model = genai.GenerativeModel(config['analysis']['gemini_model'])
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         
+        # Clean the raw text before parsing, just in case
         clean_json_string = response.text.replace('```json', '').replace('```', '').strip()
         raw_json = json.loads(clean_json_string)
         
@@ -158,7 +159,7 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, 
 
     # 2. Enrich from file metadata
     analysis_data['Media Link'] = file.get('webViewLink', '')
-    if duration_seconds and not str(analysis_data.get('Meeting duration (min)', '')).strip():
+    if duration_seconds and not analysis_data.get('Meeting duration (min)'):
         analysis_data['Meeting duration (min)'] = f"{duration_seconds / 60:.2f}"
 
     # 3. Enrich from filename if AI analysis returns an empty value
