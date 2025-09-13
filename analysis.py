@@ -11,6 +11,10 @@ from google.api_core import exceptions as google_exceptions
 from faster_whisper import WhisperModel
 from openai import OpenAI
 
+# --- THIS IS THE FIX: Import the utility modules ---
+import gdrive
+import sheets
+
 # =======================
 # PII Redaction
 # =======================
@@ -28,7 +32,7 @@ def redact_pii(transcript: str) -> str:
 # =======================
 def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config: Dict) -> Optional[Tuple[str, float]]:
     """Transcribes audio and returns transcript and duration."""
-    import tempfile # Import here to keep it self-contained
+    import tempfile 
     logging.info("Starting transcription process...")
     whisper_model = config['analysis']['whisper_model']
     
@@ -69,10 +73,8 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
-    # This is the fix: Aggressively clean keys by stripping spaces, newlines, and quotes
     cleaned_rec = {str(k).strip().strip('"'): v for k, v in rec.items()}
 
-    # Recompute Total and % Score for consistency
     nums = [_to_num(cleaned_rec.get(k, "")) for k in SIX_CORE]
     valid_nums = [n for n in nums if n is not None]
     if len(valid_nums) > 0:
@@ -83,12 +85,10 @@ def normalize_record(rec: Dict):
         cleaned_rec["Total Score"] = ""
         cleaned_rec["% Score"] = ""
 
-    # Coerce sentiment enums
     for k in ["Overall Sentiment", "Overall Client Sentiment"]:
         if str(cleaned_rec.get(k, "")).strip() not in ["Positive", "Neutral", "Negative"]:
             cleaned_rec[k] = ""
 
-    # Ensure all final values are strings
     for k, v in cleaned_rec.items():
         if isinstance(v, (int, float)):
             cleaned_rec[k] = str(v)
@@ -157,7 +157,7 @@ def analyze_transcript(transcript: str, owner_name: str, config: Dict):
         raw_json = analyze_with_openrouter(prompt, config)
 
     if not raw_json:
-        return None # Both primary and failover failed
+        return None 
 
     normalized_data = normalize_record(raw_json)
     logging.info("Data normalization complete.")
@@ -210,7 +210,7 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, 
 # =======================
 # Main Processing Function
 # =======================
-def process_single_file(drive_service, file_meta: Dict, member_name: str, config: Dict):
+def process_single_file(drive_service, gsheets_client, file_meta: Dict, member_name: str, config: Dict):
     """Orchestrates the processing of a single media file."""
     
     file_id = file_meta.get("id")
@@ -232,10 +232,15 @@ def process_single_file(drive_service, file_meta: Dict, member_name: str, config
 
     analysis_data = analyze_transcript(transcript, member_name, config)
 
+    if analysis_data == "RATE_LIMIT_EXCEEDED":
+        logging.warning("Gemini API quota exceeded. Stopping workflow.")
+        sys.exit(0)
+
     if not analysis_data:
         raise ValueError("Gemini analysis failed or returned no data.")
 
     enriched_data = enrich_data_from_context(analysis_data, member_name, file_meta, duration_sec, config)
     
-    return enriched_data
+    sheets.write_results(gsheets_client, enriched_data, config)
+    sheets.stream_to_bigquery(enriched_data, config)
 
