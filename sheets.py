@@ -10,24 +10,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # =======================
 # Constants
 # =======================
-DEFAULT_HEADERS = [
-    "Date", "POC Name", "Society Name", "Visit Type", "Meeting Type", "Amount Value",
-    "Months", "Deal Status", "Vendor Leads", "Society Leads", "Opening Pitch Score",
-    "Product Pitch Score", "Cross-Sell / Opportunity Handling", "Closing Effectiveness",
-    "Negotiation Strength", "Overall Sentiment", "Total Score", "% Score",
-    "Risks / Unresolved Issues", "Improvements Needed", "Owner", "Email Id",
-    "Kibana ID", "Manager", "Manager Email", "Product Pitch", "Team", "Media Link", "Doc Link",
-    "Suggestions & Missed Topics", "Pre-meeting brief", "Meeting duration (min)",
-    "Rebuttal Handling", "Rapport Building", "Improvement Areas",
-    "Product Knowledge Displayed", "Call Effectiveness and Control",
-    "Next Step Clarity and Commitment", "Missed Opportunities", "Key Discussion Points",
-    "Key Questions", "Competition Discussion", "Action items", "Positive Factors",
-    "Negative Factors", "Customer Needs", "Overall Client Sentiment", "Feature Checklist Coverage"
-]
-
 RETRY_CONFIG = {
     'wait': wait_exponential(multiplier=2, min=5, max=60),
     'stop': stop_after_attempt(5),
+    'reraise': True, # Re-raise the exception after the final attempt
 }
 
 # =======================
@@ -77,9 +63,11 @@ def write_results(gsheets_client: gspread.Client, data: Dict[str, Any], config: 
         headers = worksheet.row_values(1)
         if not headers:
             logging.info("No headers found in results sheet. Writing default headers.")
-            worksheet.append_row(DEFAULT_HEADERS, value_input_option="USER_ENTERED")
-            headers = DEFAULT_HEADERS
+            headers = config.get('sheets_headers', [])
+            if headers:
+                worksheet.append_row(headers, value_input_option="USER_ENTERED")
 
+        # Ensure the data being written is flat and contains only the headers expected in the sheet
         flat_data = {k: v for k, v in data.items() if isinstance(v, (str, int, float, bool)) or v is None}
         row_to_insert = [str(flat_data.get(header, "")) for header in headers]
         
@@ -110,33 +98,28 @@ def update_ledger(gsheets_client: gspread.Client, file_id: str, status: str, err
 # =======================
 # BigQuery Operations
 # =======================
-def stream_to_bigquery(data: Dict[str, Any], config: Dict):
-    """Streams a single record to the BigQuery table with error handling."""
+@retry(**RETRY_CONFIG)
+def stream_to_bigquery(bq_client: bigquery.Client, data: Dict[str, Any], config: Dict):
+    """Streams a single record to the BigQuery table."""
     try:
-        gcp_key_str = os.environ.get("GCP_SA_KEY")
-        if not gcp_key_str:
-            logging.error("BQ ERROR: GCP_SA_KEY not found.")
-            return
-
-        creds_info = json.loads(gcp_key_str)
-        creds = service_account.Credentials.from_service_account_info(creds_info)
         project_id = config['google_bigquery']['project_id']
-        bq_client = bigquery.Client(credentials=creds, project=project_id)
-        
         dataset_id = config['google_bigquery']['dataset_id']
         table_id = config['google_bigquery']['table_id']
         table_ref = f"{project_id}.{dataset_id}.{table_id}"
         
-        headers = config.get('sheets_headers', DEFAULT_HEADERS)
-        bq_record = {header.replace(" ", "_").replace("/", "_"): str(val) for header, val in data.items() if header in headers}
+        headers = config.get('sheets_headers', [])
+        # BigQuery column names cannot have spaces or special chars; replace them
+        bq_record = {header.replace(" ", "_").replace("/", "_").replace("%", "Percent"): str(val) for header, val in data.items() if header in headers}
         
         errors = bq_client.insert_rows_json(table_ref, [bq_record])
-        if errors:
-            logging.error(f"BQ ERROR: Encountered errors while streaming to BigQuery: {errors}")
+        if not errors:
+            logging.info(f"Successfully streamed record for '{data.get('Society Name', '')}' to BigQuery.")
         else:
-            logging.info(f"SUCCESS: Streamed record for '{data.get('Society Name', '')}' to BigQuery.")
+            logging.error(f"Encountered errors while streaming to BigQuery: {errors}")
+            
     except Exception as e:
-        logging.error(f"CRITICAL BQ ERROR: Failed to stream data to BigQuery: {e}")
+        logging.error(f"ERROR: Failed to stream data to BigQuery: {e}")
+        # Do not re-raise, as this is a non-critical step
 
 def get_all_results(gsheets_client: gspread.Client, config: Dict) -> List[Dict]:
     """Fetches all records from the results tab for the dashboard export."""
