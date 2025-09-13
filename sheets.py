@@ -1,180 +1,93 @@
 import logging
-import time
-from typing import Dict, List, Any
+from typing import Dict, List
+import datetime
 
-import gspread
-from google.cloud import bigquery
-from google.cloud.exceptions import NotFound
-from tenacity import retry, stop_after_attempt, wait_exponential
+DEFAULT_HEADERS = [
+    "Date", "POC Name", "Society Name", "Visit Type", "Meeting Type",
+    "Amount Value", "Months", "Deal Status", "Vendor Leads", "Society Leads",
+    "Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling",
+    "Closing Effectiveness", "Negotiation Strength", "Overall Sentiment",
+    "Total Score", "% Score", "Risks / Unresolved Issues", "Improvements Needed",
+    "Owner", "Email Id", "Kibana ID", "Manager", "Product Pitch", "Team",
+    "Media Link", "Doc Link", "Suggestions & Missed Topics", "Pre-meeting brief",
+    "Meeting duration (min)", "Rebuttal Handling", "Rapport Building",
+    "Improvement Areas", "Product Knowledge Displayed", "Call Effectiveness and Control",
+    "Next Step Clarity and Commitment", "Missed Opportunities", "Key Discussion Points",
+    "Key Questions", "Competition Discussion", "Action items", "Positive Factors",
+    "Negative Factors", "Customer Needs", "Overall Client Sentiment", "Feature Checklist Coverage"
+]
 
-# =======================
-# Constants
-# =======================
-RETRY_CONFIG = {
-    "wait": wait_exponential(multiplier=2, min=5, max=60),
-    "stop": stop_after_attempt(5),
-    "reraise": True,
-}
+LEDGER_HEADERS = ["File ID", "File Name", "Status", "Error", "Timestamp"]
 
-# =======================
-# Sheets Operations with Retry Logic
-# =======================
-@retry(**RETRY_CONFIG)
-def get_processed_file_ids(gsheets_client: gspread.Client, config: Dict) -> Dict[str, Dict[str, str]]:
-    """
-    Retrieves processed file IDs from the ledger tab.
-    Returns a dict: {file_id: {"status": str, "timestamp": str, "error": str, "original_folder": str}}
-    """
+
+# -----------------------
+# Ledger Functions
+# -----------------------
+def get_processed_file_ids(gsheets_client, config) -> List[str]:
+    """Reads the ledger sheet and returns all previously processed file IDs."""
     try:
-        logging.info("Retrieving processed file ledger from Google Sheets...")
         sheet_id = config["google_sheets"]["sheet_id"]
-        ledger_tab_name = config["google_sheets"]["ledger_tab_name"]
+        ledger_ws = gsheets_client.open_by_key(sheet_id).worksheet("Ledger")
 
-        spreadsheet = gsheets_client.open_by_key(sheet_id)
-
-        try:
-            worksheet = spreadsheet.worksheet(ledger_tab_name)
-        except gspread.WorksheetNotFound:
-            logging.warning(f"Ledger tab '{ledger_tab_name}' not found. Creating it.")
-            worksheet = spreadsheet.add_worksheet(title=ledger_tab_name, rows="1000", cols="5")
-            worksheet.append_row(["File ID", "Status", "Timestamp", "Error Message", "Original Folder"])
-            return {}
-
-        records = worksheet.get_all_records()
-        ledger = {
-            str(row["File ID"]): {
-                "status": row.get("Status", ""),
-                "timestamp": row.get("Timestamp", ""),
-                "error": row.get("Error Message", ""),
-                "original_folder": row.get("Original Folder", ""),
-            }
-            for row in records if row.get("File ID")
-        }
-
-        logging.info(f"Found {len(ledger)} file IDs in the ledger.")
-        return ledger
-
+        records = ledger_ws.get_all_records()
+        file_ids = [r["File ID"] for r in records if "File ID" in r and r["File ID"]]
+        logging.info(f"Found {len(file_ids)} file IDs in the ledger.")
+        return file_ids
     except Exception as e:
-        logging.error(f"ERROR: Could not retrieve processed file ledger: {e}")
-        raise
+        logging.warning(f"Ledger not found or unreadable, returning empty list: {e}")
+        return []
 
 
-@retry(**RETRY_CONFIG)
-def write_results(gsheets_client: gspread.Client, data: Dict[str, Any], config: Dict):
-    """Writes the analysis results to the main results tab."""
+def update_ledger(gsheets_client, file_id: str, status: str, error: str, config: Dict):
+    """Appends a new row to the ledger for tracking."""
     try:
-        logging.info("Attempting to write data to Google Sheets...")
         sheet_id = config["google_sheets"]["sheet_id"]
-        results_tab_name = config["google_sheets"]["results_tab_name"]
-
-        spreadsheet = gsheets_client.open_by_key(sheet_id)
-
         try:
-            worksheet = spreadsheet.worksheet(results_tab_name)
-        except gspread.WorksheetNotFound:
-            logging.warning(f"Results tab '{results_tab_name}' not found. Creating it.")
-            worksheet = spreadsheet.add_worksheet(title=results_tab_name, rows="1000", cols="50")
+            ledger_ws = gsheets_client.open_by_key(sheet_id).worksheet("Ledger")
+        except Exception:
+            # Create Ledger sheet if it doesn't exist
+            spreadsheet = gsheets_client.open_by_key(sheet_id)
+            ledger_ws = spreadsheet.add_worksheet(title="Ledger", rows="1000", cols="5")
+            ledger_ws.append_row(LEDGER_HEADERS)
 
-        headers = worksheet.row_values(1)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ledger_ws.append_row([file_id, "", status, error, timestamp])
+        logging.info(f"SUCCESS: Ledger appended new row for file {file_id}.")
+    except Exception as e:
+        logging.error(f"ERROR updating ledger for {file_id}: {e}")
+
+
+# -----------------------
+# Main Data Sheet Functions
+# -----------------------
+def write_analysis_result(gsheets_client, analysis_data: Dict[str, str], config: Dict):
+    """Appends structured analysis results to the main Google Sheet."""
+    try:
+        sheet_id = config["google_sheets"]["sheet_id"]
+        ws = gsheets_client.open_by_key(sheet_id).worksheet("Results")
+
+        headers = ws.row_values(1)
         if not headers:
-            logging.info("No headers found in results sheet. Writing default headers.")
-            headers = config.get("sheets_headers", [])
-            if headers:
-                worksheet.append_row(headers, value_input_option="USER_ENTERED")
+            ws.append_row(DEFAULT_HEADERS, value_input_option="USER_ENTERED")
+            headers = DEFAULT_HEADERS
 
-        # Only write values matching the expected headers
-        flat_data = {
-            k: v for k, v in data.items() if isinstance(v, (str, int, float, bool)) or v is None
-        }
-        row_to_insert = [str(flat_data.get(header, "")) for header in headers]
-
-        worksheet.append_row(row_to_insert, value_input_option="USER_ENTERED")
-        logging.info(f"SUCCESS: Data for '{data.get('Society Name', '')}' written to Google Sheets.")
-
+        row = [analysis_data.get(h, "") for h in headers]
+        ws.append_row(row, value_input_option="USER_ENTERED")
+        logging.info(
+            f"SUCCESS: Wrote analysis result for '{analysis_data.get('Society Name', 'Unknown')}'"
+        )
     except Exception as e:
-        logging.error(f"ERROR: Failed to write to Google Sheets: {e}")
-        raise
+        logging.error(f"ERROR: Failed to write analysis result: {e}")
 
 
-@retry(**RETRY_CONFIG)
-def update_ledger(
-    gsheets_client: gspread.Client,
-    file_id: str,
-    status: str,
-    error_message: str,
-    config: Dict,
-    original_folder: str = "",
-):
-    """Adds or updates a file's status in the processed ledger."""
-    try:
-        logging.info(f"Updating ledger for file {file_id} with status: {status}")
-        sheet_id = config["google_sheets"]["sheet_id"]
-        ledger_tab_name = config["google_sheets"]["ledger_tab_name"]
-
-        spreadsheet = gsheets_client.open_by_key(sheet_id)
-        worksheet = spreadsheet.worksheet(ledger_tab_name)
-
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-
-        # Try to find existing row
-        cell = worksheet.find(file_id)
-        if cell:
-            row_num = cell.row
-            worksheet.update(
-                f"B{row_num}:E{row_num}",
-                [[status, timestamp, error_message, original_folder]],
-                value_input_option="USER_ENTERED",
-            )
-            logging.info(f"SUCCESS: Ledger updated in-place for file {file_id}.")
-        else:
-            worksheet.append_row(
-                [file_id, status, timestamp, error_message, original_folder],
-                value_input_option="USER_ENTERED",
-            )
-            logging.info(f"SUCCESS: Ledger appended new row for file {file_id}.")
-
-    except Exception as e:
-        logging.error(f"ERROR: Failed to update ledger: {e}")
-        raise
-
-# =======================
-# BigQuery Operations
-# =======================
-@retry(**RETRY_CONFIG)
-def stream_to_bigquery(bq_client: bigquery.Client, data: Dict[str, Any], config: Dict):
-    """Streams a single record to the BigQuery table."""
-    try:
-        project_id = config["google_bigquery"]["project_id"]
-        dataset_id = config["google_bigquery"]["dataset_id"]
-        table_id = config["google_bigquery"]["table_id"]
-        table_ref = f"{project_id}.{dataset_id}.{table_id}"
-
-        headers = config.get("sheets_headers", [])
-        bq_record = {
-            header.replace(" ", "_").replace("/", "_").replace("%", "Percent"): str(val)
-            for header, val in data.items()
-            if header in headers
-        }
-
-        errors = bq_client.insert_rows_json(table_ref, [bq_record])
-        if not errors:
-            logging.info(f"Successfully streamed record for '{data.get('Society Name', '')}' to BigQuery.")
-        else:
-            logging.error(f"Encountered errors while streaming to BigQuery: {errors}")
-
-    except Exception as e:
-        logging.error(f"ERROR: Failed to stream data to BigQuery: {e}")
-
-
-def get_all_results(gsheets_client: gspread.Client, config: Dict) -> List[Dict]:
-    """Fetches all records from the results tab for the dashboard export."""
-    logging.info("Fetching all records from Google Sheet for dashboard export...")
+def get_all_results(gsheets_client, config: Dict) -> List[Dict]:
+    """Fetches all rows from the Results sheet for dashboard export."""
     try:
         sheet_id = config["google_sheets"]["sheet_id"]
-        results_tab_name = config["google_sheets"]["results_tab_name"]
-        spreadsheet = gsheets_client.open_by_key(sheet_id)
-        worksheet = spreadsheet.worksheet(results_tab_name)
-        return worksheet.get_all_records()
+        ws = gsheets_client.open_by_key(sheet_id).worksheet("Results")
+        records = ws.get_all_records()
+        logging.info(f"Exported {len(records)} rows from Results sheet.")
+        return records
     except Exception as e:
-        logging.error(f"Could not fetch all results from sheet: {e}")
+        logging.error(f"ERROR: Could not fetch results for dashboard export: {e}")
         return []
