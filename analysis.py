@@ -49,15 +49,11 @@ def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config:
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
 # =======================
-# Data Normalization (Upgraded)
+# Data Normalization (Upgraded with the final fix)
 # =======================
 SIX_CORE = [
-    "Opening Pitch Score",
-    "Product Pitch Score",
-    "Cross-Sell / Opportunity Handling",
-    "Closing Effectiveness",
-    "Negotiation Strength",
-    "Rebuttal Handling",
+    "Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling",
+    "Closing Effectiveness", "Negotiation Strength", "Rebuttal Handling",
 ]
 
 def _to_num(s):
@@ -71,8 +67,9 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
-    # THIS IS THE FIX: Create a new dictionary with cleaned keys (removes spaces/newlines)
-    cleaned_rec = {str(k).strip(): v for k, v in rec.items()}
+    # --- THIS IS THE FINAL FIX ---
+    # Create a new dictionary, stripping whitespace AND quotes from keys
+    cleaned_rec = {str(k).strip().strip('"'): v for k, v in rec.items()}
 
     # Recompute Total and % Score for consistency
     nums = [_to_num(cleaned_rec.get(k, "")) for k in SIX_CORE]
@@ -122,7 +119,6 @@ def analyze_transcript(transcript: str, owner_name: str, config: Dict):
         model = genai.GenerativeModel(config['analysis']['gemini_model'])
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         
-        # Clean the raw text before parsing, just in case
         clean_json_string = response.text.replace('```json', '').replace('```', '').strip()
         raw_json = json.loads(clean_json_string)
         
@@ -148,7 +144,6 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, 
     manager_map = config.get('manager_map', {})
     manager_emails = config.get('manager_emails', {})
 
-    # 1. Enrich from folder context
     analysis_data['Owner'] = member_name
     manager_info = manager_map.get(member_name, {})
     manager_name = manager_info.get('Manager', '')
@@ -157,12 +152,10 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, 
     analysis_data['Email Id'] = manager_info.get('Email', '')
     analysis_data['Manager Email'] = manager_emails.get(manager_name, '')
 
-    # 2. Enrich from file metadata
     analysis_data['Media Link'] = file.get('webViewLink', '')
     if duration_seconds and not analysis_data.get('Meeting duration (min)'):
         analysis_data['Meeting duration (min)'] = f"{duration_seconds / 60:.2f}"
 
-    # 3. Enrich from filename if AI analysis returns an empty value
     if not str(analysis_data.get('Kibana ID', '')).strip():
         kibana_match = re.search(r'(8[a-f0-9]{31})', file_name, re.IGNORECASE)
         if kibana_match: analysis_data['Kibana ID'] = kibana_match.group(1)
