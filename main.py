@@ -108,6 +108,7 @@ def main():
                     logging.info(f"--- Processing file: {file_name} (ID: {file_id}) ---")
 
                     try:
+                        # The main processing logic is now consolidated in analysis.py
                         analysis.process_single_file(drive_service, gsheets_client, file_meta, member_name, config)
                         
                     except Exception as e:
