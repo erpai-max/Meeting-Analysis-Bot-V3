@@ -44,7 +44,7 @@ def authenticate_google_services():
     except Exception as e:
         logging.error(f"CRITICAL: Authentication failed: {e}")
         return None, None
-
+        
 # =======================
 # Data Export for Dashboard
 # =======================
@@ -67,7 +67,7 @@ def export_data_for_dashboard(gsheets_client, config):
 # =======================
 def main():
     """Main function to orchestrate the entire analysis pipeline."""
-    logging.info("--- Starting Meeting Analysis Bot v4.3 ---")
+    logging.info("--- Starting Meeting Analysis Bot v4 ---")
     
     try:
         with open("config.yaml", "r") as f:
@@ -111,15 +111,10 @@ def main():
                         analysis_result = analysis.process_single_file(drive_service, file_meta, member_name, config)
                         
                         if analysis_result:
-                            # Step 1: Write to Sheets (critical path)
                             sheets.write_results(gsheets_client, analysis_result, config)
-                            
-                            # Step 2: Move file and update ledger (critical path)
+                            sheets.stream_to_bigquery(analysis_result, config)
                             gdrive.move_file(drive_service, file_id, folder_id, config['google_drive']['processed_folder_id'])
                             sheets.update_ledger(gsheets_client, file_id, "Success", "", config)
-                            
-                            # Step 3: Stream to BigQuery (non-critical, will not stop the process on failure)
-                            sheets.stream_to_bigquery(analysis_result, config)
                         
                     except Exception as e:
                         error_message = f"Unhandled error in main loop for file {file_name}: {e}"
