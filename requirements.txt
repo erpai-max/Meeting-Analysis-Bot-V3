@@ -1,20 +1,31 @@
+# -------------------
 # Core Google Libraries
-google-api-python-client
-google-auth-oauthlib
-gspread
-google-cloud-bigquery
+# -------------------
+google-api-python-client>=2.125.0
+google-auth>=2.22.0
+google-auth-oauthlib>=1.1.0
+gspread>=5.7.2
+google-cloud-bigquery>=3.11.4
 
+# -------------------
 # AI & Transcription
-google-generativeai
-faster-whisper
-openai # For OpenRouter failover
+# -------------------
+google-generativeai>=0.5.4
+faster-whisper>=0.10.0
+openai>=1.40.0   # For OpenRouter failover
+httpx>=0.27.0    # Safer OpenRouter + OpenAI requests
 
-# Optional: Uncomment the two lines below if you enable diarization in config.yaml
-# pyannote.audio
-# torch
+# -------------------
+# Optional (for diarization in config.yml)
+# Uncomment only if you enable diarization
+# pyannote.audio==3.1.1
+# torch==2.3.0
 
+# -------------------
 # Utilities
-pyyaml
-tenacity
-requests # For email/Slack notifications
-
+# -------------------
+pyyaml>=6.0.1
+tenacity>=8.2.3
+requests>=2.31.0
+pandas>=2.1.0
+numpy>=1.26.0
