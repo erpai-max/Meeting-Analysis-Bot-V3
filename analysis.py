@@ -49,7 +49,7 @@ def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config:
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
 # =======================
-# Data Normalization (Upgraded with the final fix)
+# Data Normalization (with Final Fix)
 # =======================
 SIX_CORE = [
     "Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling",
@@ -67,8 +67,7 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
-    # --- THIS IS THE FINAL FIX ---
-    # Create a new dictionary, stripping whitespace AND quotes from keys
+    # THIS IS THE FINAL FIX: This line cleans spaces AND stray quotation marks from the keys.
     cleaned_rec = {str(k).strip().strip('"'): v for k, v in rec.items()}
 
     # Recompute Total and % Score for consistency
