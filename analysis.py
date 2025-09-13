@@ -2,12 +2,17 @@ import logging
 import re
 import os
 import json
+import sys
 from typing import Dict, Optional, Tuple
 from decimal import Decimal, ROUND_HALF_UP
 
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from faster_whisper import WhisperModel
+
+# Import utility modules
+import gdrive
+import sheets
 
 # =======================
 # PII Redaction
@@ -49,7 +54,7 @@ def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config:
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
 # =======================
-# Data Normalization (with Final Fix)
+# Data Normalization
 # =======================
 SIX_CORE = [
     "Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling",
@@ -67,10 +72,8 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
-    # THIS IS THE FINAL FIX: This line cleans spaces AND stray quotation marks from the keys.
     cleaned_rec = {str(k).strip().strip('"'): v for k, v in rec.items()}
 
-    # Recompute Total and % Score for consistency
     nums = [_to_num(cleaned_rec.get(k, "")) for k in SIX_CORE]
     valid_nums = [n for n in nums if n is not None]
     if len(valid_nums) > 0:
@@ -81,12 +84,10 @@ def normalize_record(rec: Dict):
         cleaned_rec["Total Score"] = ""
         cleaned_rec["% Score"] = ""
 
-    # Coerce sentiment enums
     for k in ["Overall Sentiment", "Overall Client Sentiment"]:
         if str(cleaned_rec.get(k, "")).strip() not in ["Positive", "Neutral", "Negative"]:
             cleaned_rec[k] = ""
 
-    # Ensure all final values are strings
     for k, v in cleaned_rec.items():
         if isinstance(v, (int, float)):
             cleaned_rec[k] = str(v)
@@ -175,4 +176,40 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, 
         if name_part and name_part[0]: analysis_data['Society Name'] = name_part[0].strip().replace('_', ' ').replace('.', ' ')
 
     return analysis_data
+
+# =======================
+# Main Processing Function
+# =======================
+def process_single_file(drive_service, file_meta: Dict, member_name: str, config: Dict):
+    """Orchestrates the processing of a single media file."""
+    
+    file_id = file_meta.get("id")
+    file_name = file_meta.get("name", "Unknown Filename")
+
+    file_content = gdrive.download_file(drive_service, file_id)
+
+    transcript, duration_sec = None, 0.0
+    transcribe_result = transcribe_audio(file_content, file_name, config)
+    if transcribe_result:
+        transcript, duration_sec = transcribe_result
+
+    if not transcript:
+        raise ValueError("Transcription failed or produced an empty transcript.")
+
+    if config['analysis'].get('redact_pii', False):
+        logging.info("PII redaction is enabled. Redacting transcript...")
+        transcript = redact_pii(transcript)
+
+    analysis_data = analyze_transcript(transcript, member_name, config)
+
+    if analysis_data == "RATE_LIMIT_EXCEEDED":
+        logging.warning("Gemini API quota exceeded. Stopping workflow.")
+        sys.exit(0)
+
+    if not analysis_data:
+        raise ValueError("Gemini analysis failed or returned no data.")
+
+    enriched_data = enrich_data_from_context(analysis_data, member_name, file_meta, duration_sec, config)
+    
+    return enriched_data
 
