@@ -67,7 +67,7 @@ def export_data_for_dashboard(gsheets_client, config):
 # =======================
 def main():
     """Main function to orchestrate the entire analysis pipeline."""
-    logging.info("--- Starting Meeting Analysis Bot v4 ---")
+    logging.info("--- Starting Meeting Analysis Bot v4.3 ---")
     
     try:
         with open("config.yaml", "r") as f:
@@ -108,13 +108,8 @@ def main():
                     logging.info(f"--- Processing file: {file_name} (ID: {file_id}) ---")
 
                     try:
-                        analysis_result = analysis.process_single_file(drive_service, file_meta, member_name, config)
-                        
-                        if analysis_result:
-                            sheets.write_results(gsheets_client, analysis_result, config)
-                            sheets.stream_to_bigquery(analysis_result, config)
-                            gdrive.move_file(drive_service, file_id, folder_id, config['google_drive']['processed_folder_id'])
-                            sheets.update_ledger(gsheets_client, file_id, "Success", "", config)
+                        # The main processing logic is now consolidated in analysis.py
+                        analysis.process_single_file(drive_service, gsheets_client, file_meta, member_name, config)
                         
                     except Exception as e:
                         error_message = f"Unhandled error in main loop for file {file_name}: {e}"
