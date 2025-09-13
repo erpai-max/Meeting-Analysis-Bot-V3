@@ -47,7 +47,7 @@ def get_processed_file_ids(gsheets_client: gspread.Client, config: Dict) -> Set[
             worksheet = spreadsheet.worksheet(ledger_tab_name)
         except gspread.WorksheetNotFound:
             logging.warning(f"Ledger tab '{ledger_tab_name}' not found. Creating it.")
-            worksheet = spreadsheet.add_worksheet(title=ledger_tab_name, rows="100", cols="4")
+            worksheet = spreadsheet.add_worksheet(title=ledger_tab_name, rows="1000", cols="4")
             worksheet.append_row(["File ID", "Status", "Timestamp", "Error Message"])
             return set()
 
@@ -110,11 +110,19 @@ def update_ledger(gsheets_client: gspread.Client, file_id: str, status: str, err
 # =======================
 # BigQuery Operations
 # =======================
-@retry(**RETRY_CONFIG)
-def stream_to_bigquery(bq_client: bigquery.Client, data: Dict[str, Any], config: Dict):
-    """Streams a single record to the BigQuery table."""
+def stream_to_bigquery(data: Dict[str, Any], config: Dict):
+    """Streams a single record to the BigQuery table with error handling."""
     try:
+        gcp_key_str = os.environ.get("GCP_SA_KEY")
+        if not gcp_key_str:
+            logging.error("BQ ERROR: GCP_SA_KEY not found.")
+            return
+
+        creds_info = json.loads(gcp_key_str)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
         project_id = config['google_bigquery']['project_id']
+        bq_client = bigquery.Client(credentials=creds, project=project_id)
+        
         dataset_id = config['google_bigquery']['dataset_id']
         table_id = config['google_bigquery']['table_id']
         table_ref = f"{project_id}.{dataset_id}.{table_id}"
@@ -124,12 +132,11 @@ def stream_to_bigquery(bq_client: bigquery.Client, data: Dict[str, Any], config:
         
         errors = bq_client.insert_rows_json(table_ref, [bq_record])
         if errors:
-            logging.error(f"Encountered errors while streaming to BigQuery: {errors}")
+            logging.error(f"BQ ERROR: Encountered errors while streaming to BigQuery: {errors}")
         else:
-            logging.info(f"Successfully streamed record for '{data.get('Society Name', '')}' to BigQuery.")
+            logging.info(f"SUCCESS: Streamed record for '{data.get('Society Name', '')}' to BigQuery.")
     except Exception as e:
-        logging.error(f"ERROR: Failed to stream data to BigQuery: {e}")
-        raise
+        logging.error(f"CRITICAL BQ ERROR: Failed to stream data to BigQuery: {e}")
 
 def get_all_results(gsheets_client: gspread.Client, config: Dict) -> List[Dict]:
     """Fetches all records from the results tab for the dashboard export."""
