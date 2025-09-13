@@ -55,7 +55,7 @@ def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config:
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
 # =======================
-# AI Analysis and Data Processing (Combined for Robustness)
+# Data Normalization
 # =======================
 SIX_CORE = [
     "Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling",
@@ -68,18 +68,15 @@ def _to_num(s):
     except (ValueError, TypeError):
         return None
 
-def _normalize_and_enrich(raw_rec: Dict, member_name: str, file: Dict, duration_seconds: float, config: Dict) -> Dict:
-    """
-    This is the definitive fix. It takes the raw AI output and performs all cleaning,
-    normalization, and enrichment in one safe function.
-    """
-    if not raw_rec:
+def normalize_record(rec: Dict):
+    """Cleans, validates, and re-computes scores for a raw analysis record."""
+    if not rec:
         return {}
 
-    # Step 1: Aggressively clean keys to prevent KeyErrors
-    cleaned_rec = {str(k).strip().strip('"'): v for k, v in raw_rec.items()}
+    # This is the fix: Aggressively clean keys by stripping spaces, newlines, and quotes
+    cleaned_rec = {str(k).strip().strip('"'): v for k, v in rec.items()}
 
-    # Step 2: Recompute scores for consistency
+    # Recompute Total and % Score for consistency
     nums = [_to_num(cleaned_rec.get(k, "")) for k in SIX_CORE]
     valid_nums = [n for n in nums if n is not None]
     if len(valid_nums) > 0:
@@ -90,84 +87,130 @@ def _normalize_and_enrich(raw_rec: Dict, member_name: str, file: Dict, duration_
         cleaned_rec["Total Score"] = ""
         cleaned_rec["% Score"] = ""
 
-    # Step 3: Coerce enums
+    # Coerce sentiment enums
     for k in ["Overall Sentiment", "Overall Client Sentiment"]:
         if str(cleaned_rec.get(k, "")).strip() not in ["Positive", "Neutral", "Negative"]:
             cleaned_rec[k] = ""
-    
-    # Step 4: Enrich with context from folders and filename
-    file_name = file.get('name', '')
-    manager_map = config.get('manager_map', {})
-    manager_emails = config.get('manager_emails', {})
 
-    cleaned_rec['Owner'] = member_name
-    manager_info = manager_map.get(member_name, {})
-    manager_name = manager_info.get('Manager', '')
-    cleaned_rec['Manager'] = manager_name
-    cleaned_rec['Team'] = manager_info.get('Team', '')
-    cleaned_rec['Email Id'] = manager_info.get('Email', '')
-    cleaned_rec['Manager Email'] = manager_emails.get(manager_name, '')
-    cleaned_rec['Media Link'] = file.get('webViewLink', '')
-    if duration_seconds and not cleaned_rec.get('Meeting duration (min)'):
-        cleaned_rec['Meeting duration (min)'] = f"{duration_seconds / 60:.2f}"
-
-    # Step 5: Enrich with data from filename if AI result is empty
-    if not str(cleaned_rec.get('Kibana ID', '')).strip():
-        kibana_match = re.search(r'(8[a-f0-9]{31})', file_name, re.IGNORECASE)
-        if kibana_match: cleaned_rec['Kibana ID'] = kibana_match.group(1)
-    if not str(cleaned_rec.get('Date', '')).strip():
-        date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2}|\d{2}[-/]\d{2}[-/]\d{4})', file_name)
-        if date_match: cleaned_rec['Date'] = date_match.group(0).replace('-', '/')
-    if not str(cleaned_rec.get('Meeting Type', '')).strip():
-        fn_lower = file_name.lower()
-        if 'fresh' in fn_lower: cleaned_rec['Meeting Type'] = 'Fresh'
-        elif 'followup' in fn_lower: cleaned_rec['Meeting Type'] = 'Followup'
-        elif 'closure' in fn_lower: cleaned_rec['Meeting Type'] = 'Closure'
-        elif 'renewal' in fn_lower: cleaned_rec['Meeting Type'] = 'Renewal'
-    if not str(cleaned_rec.get('Society Name', '')).strip():
-        name_part = re.split(r'[_|\- ]+(ASP|ERP|DEMO|FRESH|\d{2}[-/]\d{2})', file_name, flags=re.IGNORECASE)
-        if name_part and name_part[0]: cleaned_rec['Society Name'] = name_part[0].strip().replace('_', ' ').replace('.', ' ')
-
-    # Step 6: Final type conversion to string for Sheets
+    # Ensure all final values are strings
     for k, v in cleaned_rec.items():
-        if isinstance(v, (int, float, bool)) or v is None:
+        if isinstance(v, (int, float)):
             cleaned_rec[k] = str(v)
             
     return cleaned_rec
 
+# =======================
+# AI Analysis with Failover
+# =======================
 def analyze_with_openrouter(prompt: str, config: Dict) -> Optional[Dict]:
     """Fallback analysis function using OpenRouter."""
-    logging.warning("Attempting failover to OpenRouter...")
-    # ... [Implementation remains the same]
-    return None # Placeholder
+    logging.warning("Gemini quota likely exceeded. Failing over to OpenRouter...")
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if not openrouter_key:
+        logging.error("CRITICAL: OPENROUTER_API_KEY not set. Cannot use failover.")
+        return None
+        
+    try:
+        from openai import OpenAI
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=openrouter_key,
+        )
+        completion = client.chat.completions.create(
+            model=config['analysis']['openrouter_model_name'],
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        raw_json = json.loads(completion.choices[0].message.content)
+        logging.info("SUCCESS: Analysis with OpenRouter complete.")
+        return raw_json
+    except Exception as e:
+        logging.error(f"ERROR: OpenRouter analysis failed: {e}")
+        return None
 
 def analyze_transcript(transcript: str, owner_name: str, config: Dict):
     """Analyzes transcript with Gemini and fails over to OpenRouter on quota errors."""
     logging.info("Starting analysis with Gemini...")
+    
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
         logging.error("CRITICAL: GEMINI_API_KEY environment variable not found.")
         return None
+        
     genai.configure(api_key=gemini_key)
+    
     prompt_template = config.get('gemini_prompt', '')
     if not prompt_template:
         logging.error("CRITICAL: gemini_prompt not found in config.yaml.")
         return None
+        
     prompt = prompt_template.format(owner_name=owner_name, transcript=transcript)
     
+    raw_json = None
     try:
         model = genai.GenerativeModel(config['analysis']['gemini_model'])
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         clean_json_string = response.text.replace('```json', '').replace('```', '').strip()
         raw_json = json.loads(clean_json_string)
         logging.info("SUCCESS: Analysis with Gemini complete.")
-        return raw_json
     except google_exceptions.ResourceExhausted as e:
         logging.warning(f"Gemini API quota exceeded: {e}. Attempting failover to OpenRouter.")
-        return analyze_with_openrouter(prompt, config)
+        raw_json = analyze_with_openrouter(prompt, config)
     except Exception as e:
         logging.error(f"ERROR: Primary Gemini API analysis failed: {e}")
-        return analyze_with_openrouter(prompt, config)
+        logging.info("Attempting failover to OpenRouter due to non-quota error.")
+        raw_json = analyze_with_openrouter(prompt, config)
+
+    if not raw_json:
+        return None 
+
+    normalized_data = normalize_record(raw_json)
+    logging.info("Data normalization complete.")
+    return normalized_data
+
+# =======================
+# Data Enrichment
+# =======================
+def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, duration_seconds: float, config: Dict) -> Dict:
+    """Fills in missing data from context (filename, folder structure, etc.)."""
+    logging.info("Enriching data with context...")
+    
+    file_name = file.get('name', '')
+    manager_map = config.get('manager_map', {})
+    manager_emails = config.get('manager_emails', {})
+
+    analysis_data['Owner'] = member_name
+    manager_info = manager_map.get(member_name, {})
+    manager_name = manager_info.get('Manager', '')
+    analysis_data['Manager'] = manager_name
+    analysis_data['Team'] = manager_info.get('Team', '')
+    analysis_data['Email Id'] = manager_info.get('Email', '')
+    analysis_data['Manager Email'] = manager_emails.get(manager_name, '')
+
+    analysis_data['Media Link'] = file.get('webViewLink', '')
+    if duration_seconds and not analysis_data.get('Meeting duration (min)'):
+        analysis_data['Meeting duration (min)'] = f"{duration_seconds / 60:.2f}"
+
+    if not str(analysis_data.get('Kibana ID', '')).strip():
+        kibana_match = re.search(r'(8[a-f0-9]{31})', file_name, re.IGNORECASE)
+        if kibana_match: analysis_data['Kibana ID'] = kibana_match.group(1)
+
+    if not str(analysis_data.get('Date', '')).strip():
+        date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2}|\d{2}[-/]\d{2}[-/]\d{4})', file_name)
+        if date_match: analysis_data['Date'] = date_match.group(0).replace('-', '/')
+
+    if not str(analysis_data.get('Meeting Type', '')).strip():
+        fn_lower = file_name.lower()
+        if 'fresh' in fn_lower: analysis_data['Meeting Type'] = 'Fresh'
+        elif 'followup' in fn_lower: analysis_data['Meeting Type'] = 'Followup'
+        elif 'closure' in fn_lower: analysis_data['Meeting Type'] = 'Closure'
+        elif 'renewal' in fn_lower: analysis_data['Meeting Type'] = 'Renewal'
+
+    if not str(analysis_data.get('Society Name', '')).strip():
+        name_part = re.split(r'[_|\- ]+(ASP|ERP|DEMO|FRESH|\d{2}[-/]\d{2})', file_name, flags=re.IGNORECASE)
+        if name_part and name_part[0]: analysis_data['Society Name'] = name_part[0].strip().replace('_', ' ').replace('.', ' ')
+
+    return analysis_data
 
 # =======================
 # Main Processing Function
@@ -192,18 +235,26 @@ def process_single_file(drive_service, gsheets_client, file_meta: Dict, member_n
         logging.info("PII redaction is enabled. Redacting transcript...")
         transcript = redact_pii(transcript)
 
-    raw_analysis_data = analyze_transcript(transcript, member_name, config)
+    analysis_data = analyze_transcript(transcript, member_name, config)
 
-    if raw_analysis_data == "RATE_LIMIT_EXCEEDED":
-        logging.warning("API quota exceeded on primary and fallback. Stopping workflow.")
-        sys.exit(0)
-
-    if not raw_analysis_data:
+    if not analysis_data:
         raise ValueError("AI analysis failed on primary and fallback providers.")
 
-    # All cleaning and enrichment happens in this one robust function
-    final_data = _normalize_and_enrich(raw_analysis_data, member_name, file_meta, duration_sec, config)
+    enriched_data = enrich_data_from_context(analysis_data, member_name, file_meta, duration_sec, config)
     
-    sheets.write_results(gsheets_client, final_data, config)
-    sheets.stream_to_bigquery(final_data, config)
+    # Pass the BigQuery client to the sheets module
+    project_id = config['google_bigquery']['project_id']
+    try:
+        from google.cloud import bigquery
+        gcp_key_str = os.environ.get("GCP_SA_KEY")
+        creds_info = json.loads(gcp_key_str)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
+        bq_client = bigquery.Client(credentials=creds, project=project_id)
+    except Exception as e:
+        logging.warning(f"Could not create BigQuery client, skipping write: {e}")
+        bq_client = None
+
+    sheets.write_results(gsheets_client, enriched_data, config)
+    if bq_client:
+        sheets.stream_to_bigquery(bq_client, enriched_data, config)
 
