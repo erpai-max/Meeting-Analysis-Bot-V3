@@ -9,10 +9,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from faster_whisper import WhisperModel
-
-# Import utility modules
-import gdrive
-import sheets
+import openai
 
 # =======================
 # PII Redaction
@@ -21,7 +18,7 @@ def redact_pii(transcript: str) -> str:
     """Basic redaction of emails and phone numbers."""
     email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     phone_pattern = r'(\+\d{1,2}\s?)?(\(?\d{3}\)?[\s.-]?)?\d{3}[\s.-]?\d{4}'
-    
+
     redacted_transcript = re.sub(email_pattern, '[EMAIL_REDACTED]', transcript)
     redacted_transcript = re.sub(phone_pattern, '[PHONE_REDACTED]', redacted_transcript)
     return redacted_transcript
@@ -31,10 +28,10 @@ def redact_pii(transcript: str) -> str:
 # =======================
 def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config: Dict) -> Optional[Tuple[str, float]]:
     """Transcribes audio and returns transcript and duration."""
-    import tempfile 
+    import tempfile
     logging.info("Starting transcription process...")
     whisper_model = config['analysis']['whisper_model']
-    
+
     with tempfile.NamedTemporaryFile(suffix=os.path.splitext(original_filename)[1], delete=False) as temp_file:
         temp_file.write(file_content.read())
         temp_file_path = temp_file.name
@@ -57,8 +54,12 @@ def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config:
 # Data Normalization
 # =======================
 SIX_CORE = [
-    "Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling",
-    "Closing Effectiveness", "Negotiation Strength", "Rebuttal Handling",
+    "Opening Pitch Score",
+    "Product Pitch Score",
+    "Cross-Sell / Opportunity Handling",
+    "Closing Effectiveness",
+    "Negotiation Strength",
+    "Rebuttal Handling",
 ]
 
 def _to_num(s):
@@ -93,45 +94,77 @@ def normalize_record(rec: Dict):
             cleaned_rec[k] = str(v)
             
     return cleaned_rec
+    
+# =======================
+# AI Analysis (Primary & Failover)
+# =======================
+def analyze_with_openrouter(transcript: str, owner_name: str, config: Dict):
+    """Fallback analysis function using OpenRouter."""
+    logging.info("Attempting analysis with OpenRouter failover...")
+    
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if not openrouter_key:
+        logging.error("CRITICAL: OPENROUTER_API_KEY secret not found for failover.")
+        return None
 
-# =======================
-# Gemini Analysis
-# =======================
+    try:
+        client = openai.OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=openrouter_key,
+        )
+        
+        prompt_template = config.get('gemini_prompt', '')
+        system_prompt = prompt_template.split("### INPUT: MEETING TRANSCRIPT ###")[0]
+        user_prompt = f"### INPUT: MEETING TRANSCRIPT ###\n---\n{transcript}\n---"
+
+        response = client.chat.completions.create(
+            model=config['analysis']['openrouter_model_name'],
+            messages=[
+                {"role": "system", "content": system_prompt.format(owner_name=owner_name)},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        
+        raw_json_string = response.choices[0].message.content
+        raw_json = json.loads(raw_json_string)
+        normalized_data = normalize_record(raw_json)
+        
+        logging.info("SUCCESS: Analysis with OpenRouter complete and data normalized.")
+        return normalized_data
+    except Exception as e:
+        logging.error(f"ERROR: OpenRouter failover analysis also failed: {e}")
+        return None
+
 def analyze_transcript(transcript: str, owner_name: str, config: Dict):
-    """Analyzes transcript with Gemini using the prompt from config.yaml."""
-    logging.info("Starting analysis with Gemini...")
+    """Analyzes transcript, failing over to OpenRouter on Gemini quota errors."""
+    logging.info("Starting analysis with primary provider (Gemini)...")
     
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
-        logging.error("CRITICAL: GEMINI_API_KEY environment variable not found.")
-        return None
-        
+        logging.error("CRITICAL: GEMINI_API_KEY environment variable not found. Failing over.")
+        return analyze_with_openrouter(transcript, owner_name, config)
+
     genai.configure(api_key=gemini_key)
     
     prompt_template = config.get('gemini_prompt', '')
-    if not prompt_template:
-        logging.error("CRITICAL: gemini_prompt not found in config.yaml.")
-        return None
-        
     prompt = prompt_template.format(owner_name=owner_name, transcript=transcript)
     
     try:
         model = genai.GenerativeModel(config['analysis']['gemini_model'])
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        
         clean_json_string = response.text.replace('```json', '').replace('```', '').strip()
         raw_json = json.loads(clean_json_string)
-        
         normalized_data = normalize_record(raw_json)
         
         logging.info("SUCCESS: Analysis with Gemini complete and data normalized.")
         return normalized_data
     except google_exceptions.ResourceExhausted as e:
-        logging.error(f"ERROR: Gemini API analysis failed with 429 Quota Exceeded: {e}")
-        return "RATE_LIMIT_EXCEEDED"
+        logging.warning(f"Gemini API quota exceeded: {e}. Failing over to OpenRouter.")
+        return analyze_with_openrouter(transcript, owner_name, config)
     except Exception as e:
-        logging.error(f"ERROR: Gemini API analysis failed: {e}")
-        return None
+        logging.error(f"ERROR: Primary (Gemini) analysis failed: {e}. Failing over.")
+        return analyze_with_openrouter(transcript, owner_name, config)
 
 # =======================
 # Data Enrichment
@@ -178,7 +211,7 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, 
     return analysis_data
 
 # =======================
-# Main Processing Function
+# Main Processing Function (Consolidated)
 # =======================
 def process_single_file(drive_service, file_meta: Dict, member_name: str, config: Dict):
     """Orchestrates the processing of a single media file."""
@@ -203,11 +236,11 @@ def process_single_file(drive_service, file_meta: Dict, member_name: str, config
     analysis_data = analyze_transcript(transcript, member_name, config)
 
     if analysis_data == "RATE_LIMIT_EXCEEDED":
-        logging.warning("Gemini API quota exceeded. Stopping workflow.")
+        logging.warning("Primary API quota exceeded. Stopping workflow gracefully.")
         sys.exit(0)
 
     if not analysis_data:
-        raise ValueError("Gemini analysis failed or returned no data.")
+        raise ValueError("Gemini analysis failed and failover was unsuccessful.")
 
     enriched_data = enrich_data_from_context(analysis_data, member_name, file_meta, duration_sec, config)
     
