@@ -1,159 +1,161 @@
 import logging
 import json
-import os
 import tempfile
+import os
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from faster_whisper import WhisperModel
 import google.generativeai as genai
 
-import gdrive
 import sheets
 
 # =======================
 # Transcription
 # =======================
-def transcribe_audio(file_content, original_filename: str, model_name: str) -> Optional[str]:
+def transcribe_audio(file_content, file_name: str, config: Dict) -> str:
+    """Transcribes audio using Whisper."""
     logging.info("Starting transcription process...")
-    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(original_filename)[1], delete=False) as temp_file:
+    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(file_name)[1], delete=False) as temp_file:
         temp_file.write(file_content.read())
         temp_file_path = temp_file.name
+
     try:
-        model = WhisperModel(model_name, device="cpu", compute_type="int8")
-        logging.info(f"Transcribing {temp_file_path} with model '{model_name}'...")
+        model_size = config["analysis"].get("whisper_model", "tiny.en")
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
         segments, _ = model.transcribe(temp_file_path, beam_size=5)
-        transcript = " ".join(segment.text for segment in segments).strip()
-        logging.info(f"SUCCESS: Transcription completed. Length: {len(transcript)} chars")
+        transcript = " ".join(seg.text for seg in segments).strip()
+        logging.info(f"SUCCESS: Transcription completed. Length: {len(transcript)} chars.")
         return transcript
     except Exception as e:
-        logging.error(f"ERROR: Transcription failed: {e}")
-        return None
+        logging.error(f"ERROR during transcription: {e}")
+        raise
     finally:
         os.remove(temp_file_path)
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
 
 # =======================
-# Analysis with Gemini
+# AI Analysis
 # =======================
-def analyze_transcript(transcript: str, owner_name: str, config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def analyze_transcript(transcript: str, owner_name: str, config: Dict) -> Dict[str, Any]:
+    """Analyzes transcript using Gemini with ERP/ASP rich prompt."""
     logging.info("Starting analysis with Gemini...")
 
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if not gemini_key:
-        logging.error("CRITICAL: GEMINI_API_KEY not set.")
-        return None
+    model_name = config["analysis"].get("gemini_model", "gemini-1.5-flash")
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not found in environment.")
 
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel(config["analysis"]["gemini_model"])
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
 
-    # Full rich prompt with ERP + ASP scope + JSON schema
     prompt = f"""
     ### ROLE AND GOAL ###
-    You are an expert sales meeting analyst for our company, specializing in **ERP** and **ASP** solutions for housing societies.
-    Analyze the transcript of a meeting handled by **{owner_name}**.
+    You are an expert sales meeting analyst for our company, specializing in Society Management software. 
+    Analyze the transcript of a sales meeting handled by '{owner_name}'.
 
-    ### PRODUCT CONTEXT ###
-    ---
-    **ERP (Enterprise Resource Planning)**
-    * Self-service software for society management
-    * Price: ₹12 + 18% GST per flat/month
-    * Key differentiators:
-      - Instant settlement, low gateway charges
-      - Tally integration, GST/TDS/e-invoicing, bank reconciliation
-      - 350+ billing combos, late fee calc, reminders, maker-checker
-      - Asset mgmt (QR code), inventory mgmt, preventive maintenance
-      - Virtual accounts, role-based access
+    ### CONTEXT: PRODUCTS ###
+    - **ERP (₹12 + 18% GST per flat/month)**: Comprehensive society management software.
+    - **ASP (₹22.5 + 18% GST per flat/month)**: Managed accounting service with dedicated accountant.
 
-    **ASP (Accounting Services as a Product)**
-    * Done-for-you accounting service using our ERP
-    * Price: ₹22.5 + 18% GST per flat/month
-    * Scope:
-      - Dedicated accountant
-      - Billing + receipts + bookkeeping
-      - Bank reconciliation, suspense entries
-      - Financial reports, audit coordination
-      - Vendor mgmt, inventory, amenities booking
-      - Includes ERP features + managed services
-
-    ---
-    ### INPUT: TRANSCRIPT ###
+    ### TRANSCRIPT ###
     {transcript}
-    ---
 
     ### TASK ###
-    1. Identify if meeting was about ERP, ASP, or both.
-    2. Extract structured insights.
-    3. If info is missing, use "" (empty string).
-    4. Multi-point fields (e.g., Key Discussion Points) → bullet list:
-       - Point 1
-       - Point 2
+    Identify if ERP, ASP, or both were pitched. Extract structured fields.
 
-    ### OUTPUT RULES ###
-    - Only output valid JSON
-    - No text outside JSON
-    - All values as strings (even numbers)
-
-    ### SCHEMA ###
-    {{
-      "Date": "", "POC Name": "", "Society Name": "", "Visit Type": "", "Meeting Type": "",
-      "Amount Value": "", "Months": "", "Deal Status": "", "Vendor Leads": "", "Society Leads": "",
-      "Opening Pitch Score": "", "Product Pitch Score": "", "Cross-Sell / Opportunity Handling": "",
-      "Closing Effectiveness": "", "Negotiation Strength": "", "Rebuttal Handling": "",
-      "Overall Sentiment": "", "Total Score": "", "% Score": "", "Risks / Unresolved Issues": "",
-      "Improvements Needed": "", "Owner (Who handled the meeting)": "{owner_name}", "Email Id": "",
-      "Kibana ID": "", "Manager": "", "Produc Pitch": "", "Team": "", "Media Link": "", "Doc Link": "",
-      "Suggestions & Missed Topics": "", "Pre-meeting brief": "", "Meeting duration (min)": "",
-      "Rapport Building": "", "Improvement Areas": "", "Product Knowledge Displayed": "",
-      "Call Effectiveness and Control": "", "Next Step Clarity and Commitment": "",
-      "Missed Opportunities": "", "Key Discussion Points": "", "Key Questions": "",
-      "Competition Discussion": "", "Action items": "", "Positive Factors": "", "Negative Factors": "",
-      "Customer Needs": "", "Overall Client Sentiment": "", "Feature Checklist Coverage": "",
-      "Manager Email": ""
-    }}
+    ### OUTPUT ###
+    Return ONLY valid JSON with these fields:
+    {json.dumps(config["sheets_headers"], indent=2)}
     """
 
+    response = model.generate_content(
+        prompt,
+        generation_config={"response_mime_type": "application/json"},
+    )
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        logging.info("SUCCESS: Analysis with Gemini complete.")
-        return json.loads(response.text)
+        data = json.loads(response.text)
+        logging.info("SUCCESS: Gemini analysis complete.")
+        return data
     except Exception as e:
-        logging.error(f"ERROR: Gemini analysis failed: {e}")
-        return None
+        logging.error(f"ERROR parsing Gemini response: {e}")
+        raise
 
 
 # =======================
-# Orchestrator
+# Context Enrichment
 # =======================
-def process_single_file(drive_service, gsheets_client, file_meta: Dict, member_name: str, config: Dict[str, Any]):
-    """Download, transcribe, analyze, and store results for a single file."""
+def enrich_data(analysis_data: Dict[str, Any], member_name: str, file_name: str, config: Dict) -> Dict[str, Any]:
+    """Adds missing context (owner, team, manager, email, inferred date/society)."""
+    manager_map = config.get("manager_map", {})
+    enriched = dict(analysis_data)
+
+    enriched["Owner (Who handled the meeting)"] = member_name
+    m_info = manager_map.get(member_name, {})
+    enriched["Manager"] = m_info.get("Manager", "")
+    enriched["Team"] = m_info.get("Team", "")
+    enriched["Email Id"] = m_info.get("Email", "")
+
+    # Infer date from filename if missing
+    if not enriched.get("Date"):
+        date_match = re.search(r"(\d{2}[-/]\d{2}[-/]\d{2,4})", file_name)
+        if date_match:
+            enriched["Date"] = date_match.group(1)
+
+    # Infer visit type from filename
+    fn_lower = file_name.lower()
+    if not enriched.get("Visit Type"):
+        if "asp" in fn_lower:
+            enriched["Visit Type"] = "ASP Demo"
+        elif "erp" in fn_lower:
+            enriched["Visit Type"] = "ERP Demo"
+        elif "training" in fn_lower:
+            enriched["Visit Type"] = "Training"
+        elif "follow" in fn_lower:
+            enriched["Visit Type"] = "Follow Up"
+
+    # Infer society name
+    if not enriched.get("Society Name"):
+        parts = re.split(r"[-|_]", file_name)
+        if parts:
+            enriched["Society Name"] = parts[0].strip()
+
+    return enriched
+
+
+# =======================
+# Orchestration
+# =======================
+def process_single_file(drive_service, gsheets_client, file_meta, member_name: str, config: Dict):
+    """Handles the full pipeline for one file."""
     file_id = file_meta["id"]
-    file_name = file_meta.get("name", "Unknown Filename")
+    file_name = file_meta["name"]
 
-    file_content = gdrive.download_file(drive_service, file_id)
-    transcript = transcribe_audio(file_content, file_name, config["analysis"]["whisper_model"])
-
-    if not transcript:
-        raise RuntimeError("Transcription failed")
-
-    if config["analysis"].get("redact_pii"):
-        logging.info("Redacting PII from transcript (basic masking)...")
-        transcript = re.sub(r"\b\d{10}\b", "[REDACTED_PHONE]", transcript)
-
-    analysis_data = analyze_transcript(transcript, member_name, config)
-    if not analysis_data:
-        raise RuntimeError("Analysis failed")
-
-    # Write to Google Sheets
-    sheets.append_results(gsheets_client, analysis_data, config)
-    # Stream to BigQuery
     try:
-        from google.cloud import bigquery
-        bq_client = bigquery.Client()
-        sheets.stream_to_bigquery(bq_client, analysis_data, config)
+        # Step 1: Download
+        fh = drive_service.files().get_media(fileId=file_id).execute()
+        file_content = tempfile.SpooledTemporaryFile()
+        file_content.write(fh)
+        file_content.seek(0)
+
+        # Step 2: Transcribe
+        transcript = transcribe_audio(file_content, file_name, config)
+
+        # Step 3: Analyze
+        analysis_data = analyze_transcript(transcript, member_name, config)
+
+        # Step 4: Enrich
+        enriched = enrich_data(analysis_data, member_name, file_name, config)
+
+        # Step 5: Write to Sheets
+        sheets.write_results(gsheets_client, enriched, config)
+
+        # Step 6: Update Ledger
+        sheets.update_ledger(gsheets_client, file_id, "Processed", "", config)
+
+        logging.info(f"SUCCESS: Completed processing for {file_name}")
+
     except Exception as e:
-        logging.warning(f"BigQuery streaming skipped: {e}")
+        logging.error(f"ERROR processing file {file_name}: {e}")
+        raise
