@@ -1,41 +1,27 @@
 # ===================================================================
-# CONFIGURATION FILE for Meeting Analysis Bot v4.1
+# CONFIGURATION FILE for Meeting Analysis Bot v4.3
 # ===================================================================
-# This file is the central control panel for the bot.
-# Edit the placeholder values below with your actual IDs.
-
 
 # -------------------
 # Google Drive Folder IDs
 # -------------------
 google_drive:
-  # The ID of your main parent folder (e.g., "Meeting Tracker 2025")
   parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
-
-  # The ID of the folder where successfully analyzed files will be moved.
   processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
-
-  # The ID of the folder for files that fail with an unrecoverable error.
   quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
 
 # -------------------
 # Google Sheets Configuration
 # -------------------
 google_sheets:
-  # The ID of your Google Sheet.
   sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
-
-  # The name of the tab where the analysis results will be written.
   results_tab_name: "Analysis Results"
-
-  # The name of the tab used to keep a log of processed files.
   ledger_tab_name: "Processed Ledger"
 
 # -------------------
-# Google BigQuery Configuration (for long-term data warehousing)
+# Google BigQuery Configuration
 # -------------------
 google_bigquery:
-  # Your Google Cloud Project ID
   project_id: "meeting-analysis-bot"
   dataset_id: "meeting_analysis"
   table_id: "analysis_results"
@@ -55,7 +41,7 @@ manager_map:
   Pramod: { Manager: "Saleem", Team: "Hyderabad", Email: "pramod.ambadas@nobroker.in" }
   Vishal: { Manager: "Dipesh", Team: "Navi Mumbai", Email: "vishal.shinde1@nobroker.in" }
   Darshan: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "darshan.soni@nobroker.in" }
-  Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
+  Musthafa: { Manager: "Dipesh", Team: "Emerging City", Email: "musthafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
   Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
@@ -64,7 +50,7 @@ manager_map:
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
-  Pratik: "Pratik.ray@nobroker.in"
+  Pratik: "pratik.ray@nobroker.in"
 
 # -------------------
 # Headers for Sheets & BigQuery
@@ -73,7 +59,49 @@ sheets_headers:
   - Date
   - POC Name
   - Society Name
-  # ... [and so on for all 48 headers] ...
+  - Visit Type
+  - Meeting Type
+  - Amount Value
+  - Months
+  - Deal Status
+  - Vendor Leads
+  - Society Leads
+  - Opening Pitch Score
+  - Product Pitch Score
+  - Cross-Sell / Opportunity Handling
+  - Closing Effectiveness
+  - Negotiation Strength
+  - Rebuttal Handling
+  - Overall Sentiment
+  - Total Score
+  - % Score
+  - Risks / Unresolved Issues
+  - Improvements Needed
+  - Owner
+  - Email Id
+  - Kibana ID
+  - Manager
+  - Product Pitch
+  - Team
+  - Media Link
+  - Doc Link
+  - Suggestions & Missed Topics
+  - Pre-meeting brief
+  - Meeting duration (min)
+  - Rapport Building
+  - Improvement Areas
+  - Product Knowledge Displayed
+  - Call Effectiveness and Control
+  - Next Step Clarity and Commitment
+  - Missed Opportunities
+  - Key Discussion Points
+  - Key Questions
+  - Competition Discussion
+  - Action items
+  - Positive Factors
+  - Negative Factors
+  - Customer Needs
+  - Overall Client Sentiment
   - Manager Email
   - Feature Checklist Coverage
 
@@ -94,21 +122,78 @@ weekly_digest:
   enabled: true
 
 # -------------------
-# Full Gemini Prompt Template (Upgraded)
+# Full Gemini Prompt Template
 # -------------------
 gemini_prompt: |
   ### ROLE
-  You are a senior Sales Conversation Analyst... [Your full prompt here]
+  You are a senior **Sales Conversation Analyst**.  
+  Your job is to carefully read the provided transcript of a client meeting and extract structured insights.
 
-  ### TASK ###
-  Analyze the provided transcript... For the fields below, synthesize insights and format them as a bulleted list within a single string (e.g., "- Point 1\n- Point 2").
-  - **Key Discussion Points:** Summarize the main topics.
-  - **Customer Needs:** Infer the client's underlying business problems or pain points, even if not stated directly.
-  - **Positive Factors:** List what the sales rep did well.
-  - **Negative Factors:** List what the sales rep did poorly.
-  - **Missed Opportunities:** What could the rep have asked or pitched to create more value?
-  - **Action items:** Extract any commitments with a clear owner and timeline.
+  ### TASK
+  1. Parse the transcript.  
+  2. Fill in all fields in the schema below.  
+  3. If data is not explicitly available, infer logically or leave it as an empty string `""`.  
+  4. For fields that may contain multiple points (e.g., "Key Discussion Points", "Customer Needs", "Action items"), use a **bulleted string format** like:
+     ```
+     - Point 1
+     - Point 2
+     - Point 3
+     ```
+
+  ### OUTPUT RULES
+  - Output must be **valid JSON only** (no explanations, no markdown, no text outside JSON).  
+  - Strictly follow the keys and order given in schema.  
+  - All values must be strings.  
+  - If numeric, still return as string (e.g., `"85"`, `"3.5"`).  
 
   ### OUTPUT SCHEMA (STRICT)
-  { "Date": "", "POC Name": "", ... "Feature Checklist Coverage": "" }
-
+  {
+    "Date": "",
+    "POC Name": "",
+    "Society Name": "",
+    "Visit Type": "",
+    "Meeting Type": "",
+    "Amount Value": "",
+    "Months": "",
+    "Deal Status": "",
+    "Vendor Leads": "",
+    "Society Leads": "",
+    "Opening Pitch Score": "",
+    "Product Pitch Score": "",
+    "Cross-Sell / Opportunity Handling": "",
+    "Closing Effectiveness": "",
+    "Negotiation Strength": "",
+    "Rebuttal Handling": "",
+    "Overall Sentiment": "",
+    "Total Score": "",
+    "% Score": "",
+    "Risks / Unresolved Issues": "",
+    "Improvements Needed": "",
+    "Owner": "",
+    "Email Id": "",
+    "Kibana ID": "",
+    "Manager": "",
+    "Product Pitch": "",
+    "Team": "",
+    "Media Link": "",
+    "Doc Link": "",
+    "Suggestions & Missed Topics": "",
+    "Pre-meeting brief": "",
+    "Meeting duration (min)": "",
+    "Rapport Building": "",
+    "Improvement Areas": "",
+    "Product Knowledge Displayed": "",
+    "Call Effectiveness and Control": "",
+    "Next Step Clarity and Commitment": "",
+    "Missed Opportunities": "",
+    "Key Discussion Points": "",
+    "Key Questions": "",
+    "Competition Discussion": "",
+    "Action items": "",
+    "Positive Factors": "",
+    "Negative Factors": "",
+    "Customer Needs": "",
+    "Overall Client Sentiment": "",
+    "Manager Email": "",
+    "Feature Checklist Coverage": ""
+  }
