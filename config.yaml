@@ -41,7 +41,7 @@ manager_map:
   Pramod: { Manager: "Saleem", Team: "Hyderabad", Email: "pramod.ambadas@nobroker.in" }
   Vishal: { Manager: "Dipesh", Team: "Navi Mumbai", Email: "vishal.shinde1@nobroker.in" }
   Darshan: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "darshan.soni@nobroker.in" }
-  Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
+  Musthafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
   Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
@@ -50,60 +50,60 @@ manager_map:
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
-  Pratik: "Pratik.ray@nobroker.in"
+  Pratik: "pratik.ray@nobroker.in"
 
 # -------------------
 # Headers for Sheets & BigQuery
 # -------------------
 sheets_headers:
-  - Date
-  - POC Name
-  - Society Name
-  - Visit Type
-  - Meeting Type
-  - Amount Value
-  - Months
-  - Deal Status
-  - Vendor Leads
-  - Society Leads
-  - Opening Pitch Score
-  - Product Pitch Score
-  - Cross-Sell / Opportunity Handling
-  - Closing Effectiveness
-  - Negotiation Strength
-  - Rebuttal Handling
-  - Overall Sentiment
-  - Total Score
-  - % Score
-  - Risks / Unresolved Issues
-  - Improvements Needed
-  - Owner (Who handled the meeting)
-  - Email Id
-  - Kibana ID
-  - Manager
-  - Produc Pitch
-  - Team
-  - Media Link
-  - Doc Link
-  - Suggestions & Missed Topics
-  - Pre-meeting brief
-  - Meeting duration (min)
-  - Rapport Building
-  - Improvement Areas
-  - Product Knowledge Displayed
-  - Call Effectiveness and Control
-  - Next Step Clarity and Commitment
-  - Missed Opportunities
-  - Key Discussion Points
-  - Key Questions
-  - Competition Discussion
-  - Action items
-  - Positive Factors
-  - Negative Factors
-  - Customer Needs
-  - Overall Client Sentiment
-  - Feature Checklist Coverage
-  - Manager Email
+  - "Date"
+  - "POC Name"
+  - "Society Name"
+  - "Visit Type"
+  - "Meeting Type"
+  - "Amount Value"
+  - "Months"
+  - "Deal Status"
+  - "Vendor Leads"
+  - "Society Leads"
+  - "Opening Pitch Score"
+  - "Product Pitch Score"
+  - "Cross-Sell / Opportunity Handling"
+  - "Closing Effectiveness"
+  - "Negotiation Strength"
+  - "Rebuttal Handling"
+  - "Overall Sentiment"
+  - "Total Score"
+  - "% Score"
+  - "Risks / Unresolved Issues"
+  - "Improvements Needed"
+  - "Owner (Who handled the meeting)"
+  - "Email Id"
+  - "Kibana ID"
+  - "Manager"
+  - "Product Pitch"
+  - "Team"
+  - "Media Link"
+  - "Doc Link"
+  - "Suggestions & Missed Topics"
+  - "Pre-meeting brief"
+  - "Meeting duration (min)"
+  - "Rapport Building"
+  - "Improvement Areas"
+  - "Product Knowledge Displayed"
+  - "Call Effectiveness and Control"
+  - "Next Step Clarity and Commitment"
+  - "Missed Opportunities"
+  - "Key Discussion Points"
+  - "Key Questions"
+  - "Competition Discussion"
+  - "Action items"
+  - "Positive Factors"
+  - "Negative Factors"
+  - "Customer Needs"
+  - "Overall Client Sentiment"
+  - "Feature Checklist Coverage"
+  - "Manager Email"
 
 # -------------------
 # Analysis Settings
