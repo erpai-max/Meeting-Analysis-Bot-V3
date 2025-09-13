@@ -149,7 +149,7 @@ def process_single_file(drive_service, gsheets_client, file_meta: Dict, member_n
         raise RuntimeError("Analysis failed")
 
     # Write to Google Sheets
-    sheets.write_results(gsheets_client, analysis_data, config)
+    sheets.append_results(gsheets_client, analysis_data, config)
     # Stream to BigQuery
     try:
         from google.cloud import bigquery
