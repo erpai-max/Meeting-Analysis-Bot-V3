@@ -1,8 +1,6 @@
 # ===================================================================
 # CONFIGURATION FILE for Meeting Analysis Bot v4.5
 # ===================================================================
-# Central control panel for the bot. Update IDs and settings below.
-# ===================================================================
 
 # -------------------
 # Google Drive Folder IDs
@@ -76,7 +74,7 @@ sheets_headers:
   - Rebuttal Handling
   - Overall Sentiment
   - Total Score
-  - "% Score"
+  - % Score
   - Risks / Unresolved Issues
   - Improvements Needed
   - Owner (Who handled the meeting)
@@ -122,38 +120,3 @@ analysis:
 # -------------------
 weekly_digest:
   enabled: true
-
-# -------------------
-# Full Gemini Prompt Template
-# -------------------
-gemini_prompt: |
-  You are an AI sales conversation analyst.  
-  Read the transcript of the client meeting and extract structured insights about our product (ERP & ASP solutions for housing societies, including account opening, mutual funds, and partner programs).  
-
-  ### TASK
-  - Parse the transcript.  
-  - Fill in the schema below.  
-  - If something is missing, leave it as an empty string "".  
-  - For multi-point answers (e.g., Key Discussion Points, Customer Needs, Action Items), use bullet points like:
-    - Point 1
-    - Point 2
-    - Point 3
-
-  ### OUTPUT
-  Return only valid JSON, no extra text.  
-
-  ### SCHEMA
-  { "Date": "", "POC Name": "", "Society Name": "", "Visit Type": "", "Meeting Type": "",
-    "Amount Value": "", "Months": "", "Deal Status": "", "Vendor Leads": "", "Society Leads": "",
-    "Opening Pitch Score": "", "Product Pitch Score": "", "Cross-Sell / Opportunity Handling": "",
-    "Closing Effectiveness": "", "Negotiation Strength": "", "Rebuttal Handling": "",
-    "Overall Sentiment": "", "Total Score": "", "% Score": "", "Risks / Unresolved Issues": "",
-    "Improvements Needed": "", "Owner (Who handled the meeting)": "", "Email Id": "", "Kibana ID": "",
-    "Manager": "", "Produc Pitch": "", "Team": "", "Media Link": "", "Doc Link": "",
-    "Suggestions & Missed Topics": "", "Pre-meeting brief": "", "Meeting duration (min)": "",
-    "Rapport Building": "", "Improvement Areas": "", "Product Knowledge Displayed": "",
-    "Call Effectiveness and Control": "", "Next Step Clarity and Commitment": "",
-    "Missed Opportunities": "", "Key Discussion Points": "", "Key Questions": "",
-    "Competition Discussion": "", "Action items": "", "Positive Factors": "", "Negative Factors": "",
-    "Customer Needs": "", "Overall Client Sentiment": "", "Feature Checklist Coverage": "",
-    "Manager Email": "" }
