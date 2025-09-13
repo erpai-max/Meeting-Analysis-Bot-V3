@@ -1,5 +1,7 @@
 # ===================================================================
-# CONFIGURATION FILE for Meeting Analysis Bot v4.3
+# CONFIGURATION FILE for Meeting Analysis Bot v4.5
+# ===================================================================
+# Central control panel for the bot. Update IDs and settings below.
 # ===================================================================
 
 # -------------------
@@ -41,7 +43,7 @@ manager_map:
   Pramod: { Manager: "Saleem", Team: "Hyderabad", Email: "pramod.ambadas@nobroker.in" }
   Vishal: { Manager: "Dipesh", Team: "Navi Mumbai", Email: "vishal.shinde1@nobroker.in" }
   Darshan: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "darshan.soni@nobroker.in" }
-  Musthafa: { Manager: "Dipesh", Team: "Emerging City", Email: "musthafa.hatimbhai@nobroker.in" }
+  Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
   Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
@@ -50,7 +52,7 @@ manager_map:
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
-  Pratik: "pratik.ray@nobroker.in"
+  Pratik: "Pratik.ray@nobroker.in"
 
 # -------------------
 # Headers for Sheets & BigQuery
@@ -74,14 +76,14 @@ sheets_headers:
   - Rebuttal Handling
   - Overall Sentiment
   - Total Score
-  - % Score
+  - "% Score"
   - Risks / Unresolved Issues
   - Improvements Needed
-  - Owner
+  - Owner (Who handled the meeting)
   - Email Id
   - Kibana ID
   - Manager
-  - Product Pitch
+  - Produc Pitch
   - Team
   - Media Link
   - Doc Link
@@ -102,8 +104,8 @@ sheets_headers:
   - Negative Factors
   - Customer Needs
   - Overall Client Sentiment
-  - Manager Email
   - Feature Checklist Coverage
+  - Manager Email
 
 # -------------------
 # Analysis Settings
@@ -125,75 +127,33 @@ weekly_digest:
 # Full Gemini Prompt Template
 # -------------------
 gemini_prompt: |
-  ### ROLE
-  You are a senior **Sales Conversation Analyst**.  
-  Your job is to carefully read the provided transcript of a client meeting and extract structured insights.
+  You are an AI sales conversation analyst.  
+  Read the transcript of the client meeting and extract structured insights about our product (ERP & ASP solutions for housing societies, including account opening, mutual funds, and partner programs).  
 
   ### TASK
-  1. Parse the transcript.  
-  2. Fill in all fields in the schema below.  
-  3. If data is not explicitly available, infer logically or leave it as an empty string `""`.  
-  4. For fields that may contain multiple points (e.g., "Key Discussion Points", "Customer Needs", "Action items"), use a **bulleted string format** like:
-     ```
-     - Point 1
-     - Point 2
-     - Point 3
-     ```
+  - Parse the transcript.  
+  - Fill in the schema below.  
+  - If something is missing, leave it as an empty string "".  
+  - For multi-point answers (e.g., Key Discussion Points, Customer Needs, Action Items), use bullet points like:
+    - Point 1
+    - Point 2
+    - Point 3
 
-  ### OUTPUT RULES
-  - Output must be **valid JSON only** (no explanations, no markdown, no text outside JSON).  
-  - Strictly follow the keys and order given in schema.  
-  - All values must be strings.  
-  - If numeric, still return as string (e.g., `"85"`, `"3.5"`).  
+  ### OUTPUT
+  Return only valid JSON, no extra text.  
 
-  ### OUTPUT SCHEMA (STRICT)
-  {
-    "Date": "",
-    "POC Name": "",
-    "Society Name": "",
-    "Visit Type": "",
-    "Meeting Type": "",
-    "Amount Value": "",
-    "Months": "",
-    "Deal Status": "",
-    "Vendor Leads": "",
-    "Society Leads": "",
-    "Opening Pitch Score": "",
-    "Product Pitch Score": "",
-    "Cross-Sell / Opportunity Handling": "",
-    "Closing Effectiveness": "",
-    "Negotiation Strength": "",
-    "Rebuttal Handling": "",
-    "Overall Sentiment": "",
-    "Total Score": "",
-    "% Score": "",
-    "Risks / Unresolved Issues": "",
-    "Improvements Needed": "",
-    "Owner": "",
-    "Email Id": "",
-    "Kibana ID": "",
-    "Manager": "",
-    "Product Pitch": "",
-    "Team": "",
-    "Media Link": "",
-    "Doc Link": "",
-    "Suggestions & Missed Topics": "",
-    "Pre-meeting brief": "",
-    "Meeting duration (min)": "",
-    "Rapport Building": "",
-    "Improvement Areas": "",
-    "Product Knowledge Displayed": "",
-    "Call Effectiveness and Control": "",
-    "Next Step Clarity and Commitment": "",
-    "Missed Opportunities": "",
-    "Key Discussion Points": "",
-    "Key Questions": "",
-    "Competition Discussion": "",
-    "Action items": "",
-    "Positive Factors": "",
-    "Negative Factors": "",
-    "Customer Needs": "",
-    "Overall Client Sentiment": "",
-    "Manager Email": "",
-    "Feature Checklist Coverage": ""
-  }
+  ### SCHEMA
+  { "Date": "", "POC Name": "", "Society Name": "", "Visit Type": "", "Meeting Type": "",
+    "Amount Value": "", "Months": "", "Deal Status": "", "Vendor Leads": "", "Society Leads": "",
+    "Opening Pitch Score": "", "Product Pitch Score": "", "Cross-Sell / Opportunity Handling": "",
+    "Closing Effectiveness": "", "Negotiation Strength": "", "Rebuttal Handling": "",
+    "Overall Sentiment": "", "Total Score": "", "% Score": "", "Risks / Unresolved Issues": "",
+    "Improvements Needed": "", "Owner (Who handled the meeting)": "", "Email Id": "", "Kibana ID": "",
+    "Manager": "", "Produc Pitch": "", "Team": "", "Media Link": "", "Doc Link": "",
+    "Suggestions & Missed Topics": "", "Pre-meeting brief": "", "Meeting duration (min)": "",
+    "Rapport Building": "", "Improvement Areas": "", "Product Knowledge Displayed": "",
+    "Call Effectiveness and Control": "", "Next Step Clarity and Commitment": "",
+    "Missed Opportunities": "", "Key Discussion Points": "", "Key Questions": "",
+    "Competition Discussion": "", "Action items": "", "Positive Factors": "", "Negative Factors": "",
+    "Customer Needs": "", "Overall Client Sentiment": "", "Feature Checklist Coverage": "",
+    "Manager Email": "" }
