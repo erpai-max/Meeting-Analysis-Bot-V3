@@ -67,7 +67,7 @@ def export_data_for_dashboard(gsheets_client, config):
 # =======================
 def main():
     """Main function to orchestrate the entire analysis pipeline."""
-    logging.info("--- Starting Meeting Analysis Bot v3 ---")
+    logging.info("--- Starting Meeting Analysis Bot v4.2 ---")
     
     try:
         with open("config.yaml", "r") as f:
@@ -108,28 +108,16 @@ def main():
                     logging.info(f"--- Processing file: {file_name} (ID: {file_id}) ---")
 
                     try:
-                        file_content = gdrive.download_file(drive_service, file_id)
-                        transcript, duration_sec = analysis.transcribe_audio(file_content, file_name, config)
-
-                        if transcript:
-                            analysis_data = analysis.analyze_transcript(transcript, member_name, config)
-
-                            if analysis_data == "RATE_LIMIT_EXCEEDED":
-                                logging.warning("Gemini API quota exceeded. Stopping workflow.")
-                                sys.exit(0)
-
-                            if analysis_data:
-                                enriched_data = analysis.enrich_data_from_context(analysis_data, member_name, file_meta, duration_sec, config)
-                                sheets.write_results(gsheets_client, enriched_data, config)
-                                gdrive.move_file(drive_service, file_id, folder_id, config['google_drive']['processed_folder_id'])
-                                sheets.update_ledger(gsheets_client, file_id, "Success", "", config)
-                            else:
-                                raise ValueError("Gemini analysis returned no data.")
-                        else:
-                            raise ValueError("Transcription failed or produced an empty transcript.")
-
+                        analysis_result = analysis.process_single_file(drive_service, file_meta, member_name, config)
+                        
+                        if analysis_result:
+                            sheets.write_results(gsheets_client, analysis_result, config)
+                            sheets.stream_to_bigquery(analysis_result, config)
+                            gdrive.move_file(drive_service, file_id, folder_id, config['google_drive']['processed_folder_id'])
+                            sheets.update_ledger(gsheets_client, file_id, "Success", "", config)
+                        
                     except Exception as e:
-                        error_message = f"Error processing file {file_name}: {e}"
+                        error_message = f"Unhandled error in main loop for file {file_name}: {e}"
                         logging.error(error_message)
                         gdrive.quarantine_file(drive_service, file_id, folder_id, str(e), config)
                         sheets.update_ledger(gsheets_client, file_id, "Quarantined", str(e), config)
