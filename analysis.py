@@ -11,7 +11,7 @@ from google.api_core import exceptions as google_exceptions
 from faster_whisper import WhisperModel
 from openai import OpenAI
 
-# --- THIS IS THE FIX: Import the utility modules ---
+# Import utility modules
 import gdrive
 import sheets
 
@@ -73,8 +73,10 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
+    # This is the fix: Aggressively clean keys by stripping spaces, newlines, and quotes
     cleaned_rec = {str(k).strip().strip('"'): v for k, v in rec.items()}
 
+    # Recompute Total and % Score for consistency
     nums = [_to_num(cleaned_rec.get(k, "")) for k in SIX_CORE]
     valid_nums = [n for n in nums if n is not None]
     if len(valid_nums) > 0:
@@ -85,10 +87,12 @@ def normalize_record(rec: Dict):
         cleaned_rec["Total Score"] = ""
         cleaned_rec["% Score"] = ""
 
+    # Coerce sentiment enums
     for k in ["Overall Sentiment", "Overall Client Sentiment"]:
         if str(cleaned_rec.get(k, "")).strip() not in ["Positive", "Neutral", "Negative"]:
             cleaned_rec[k] = ""
 
+    # Ensure all final values are strings
     for k, v in cleaned_rec.items():
         if isinstance(v, (int, float)):
             cleaned_rec[k] = str(v)
@@ -241,6 +245,19 @@ def process_single_file(drive_service, gsheets_client, file_meta: Dict, member_n
 
     enriched_data = enrich_data_from_context(analysis_data, member_name, file_meta, duration_sec, config)
     
+    # Pass the BigQuery client to the sheets module
+    project_id = config['google_bigquery']['project_id']
+    try:
+        from google.cloud import bigquery
+        gcp_key_str = os.environ.get("GCP_SA_KEY")
+        creds_info = json.loads(gcp_key_str)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
+        bq_client = bigquery.Client(credentials=creds, project=project_id)
+    except Exception as e:
+        logging.warning(f"Could not create BigQuery client, skipping write: {e}")
+        bq_client = None
+
     sheets.write_results(gsheets_client, enriched_data, config)
-    sheets.stream_to_bigquery(enriched_data, config)
+    if bq_client:
+        sheets.stream_to_bigquery(bq_client, enriched_data, config)
 
