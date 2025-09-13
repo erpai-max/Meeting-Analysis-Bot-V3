@@ -10,31 +10,38 @@
 # -------------------
 google_drive:
   # The ID of your main parent folder (e.g., "Meeting Tracker 2025")
-  parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
+  parent_folder_id: "YOUR_MAIN_TRACKER_FOLDER_ID_HERE"
 
   # The ID of the folder where successfully analyzed files will be moved.
-  processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
+  processed_folder_id: "YOUR_PROCESSED_FOLDER_ID_HERE"
 
   # The ID of the folder for files that fail with an unrecoverable error.
-  quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
-
+  quarantine_folder_id: "YOUR_QUARANTINE_FOLDER_ID_HERE"
 
 # -------------------
-# Google Sheets & BigQuery
+# Google Sheets Configuration
 # -------------------
 google_sheets:
-  sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
+  # The ID of your Google Sheet.
+  sheet_id: "YOUR_GOOGLE_SHEET_ID_HERE"
+
+  # The name of the tab where the analysis results will be written.
   results_tab_name: "Analysis Results"
+
+  # The name of the tab used to keep a log of processed files.
   ledger_tab_name: "Processed Ledger"
 
+# -------------------
+# Google BigQuery Configuration (for long-term data warehousing)
+# -------------------
 google_bigquery:
-  project_id: "meeting-analysis-bot" # Your Google Cloud Project ID
+  # Your Google Cloud Project ID
+  project_id: "your-gcp-project-id"
   dataset_id: "meeting_analysis"
   table_id: "analysis_results"
 
-
 # -------------------
-# Team and Manager Mappings
+# Team and Manager Mapping
 # -------------------
 manager_map:
   Sripal: { Manager: "Saleem", Team: "Chennai", Email: "sripal.r@nobroker.in" }
@@ -51,8 +58,8 @@ manager_map:
   Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
-  Saleem: { Manager: "Pratik", Team: "Management", Email: "saleem.hk@nobroker.in" }
-  Dipesh: { Manager: "Pratik", Team: "Management", Email: "dipesh.karale@nobroker.in" }
+  Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
+  Dipesh: { Manager: "Self", Team: "Management", Email: "dipesh.karale@nobroker.in" }
 
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
@@ -72,25 +79,7 @@ analysis:
 # Weekly Digest Settings
 # -------------------
 weekly_digest:
-  enabled: true
-
-# -------------------
-# Headers for Sheets & BigQuery Schema
-# -------------------
-sheets_headers: [
-    "Date", "POC Name", "Society Name", "Visit Type", "Meeting Type", "Amount Value",
-    "Months", "Deal Status", "Vendor Leads", "Society Leads", "Opening Pitch Score",
-    "Product Pitch Score", "Cross-Sell / Opportunity Handling", "Closing Effectiveness",
-    "Negotiation Strength", "Overall Sentiment", "Total Score", "% Score",
-    "Risks / Unresolved Issues", "Improvements Needed", "Owner", "Email Id",
-    "Kibana ID", "Manager", "Manager Email", "Product Pitch", "Team", "Media Link", "Doc Link",
-    "Suggestions & Missed Topics", "Pre-meeting brief", "Meeting duration (min)",
-    "Rebuttal Handling", "Rapport Building", "Improvement Areas",
-    "Product Knowledge Displayed", "Call Effectiveness and Control",
-    "Next Step Clarity and Commitment", "Missed Opportunities", "Key Discussion Points",
-    "Key Questions", "Competition Discussion", "Action items", "Positive Factors",
-    "Negative Factors", "Customer Needs", "Overall Client Sentiment", "Feature Checklist Coverage"
-]
+  enabled: true # Set to false to disable weekly email reports
 
 # -------------------
 # Full Gemini Prompt Template
@@ -117,21 +106,37 @@ gemini_prompt: |
   - Negotiation Strength: handles price/terms/objections confidently; offers value framing; avoids unnecessary discounting.
     10: Strong framing; 7–8: Adequate; 4–6: Defensive; 1–3: Concedes without strategy.
   - Rebuttal Handling: identifies objection category, answers succinctly, checks resolution.
+  - Rapport Building: personalization, active listening, mirroring, empathy markers.
+  - Product Knowledge Displayed: correctness, depth, compliance (GST/TDS, Tally), integration details.
+  - Call Effectiveness and Control: pacing, turn-taking, parking lot for tangents, timeboxing.
+  - Next Step Clarity and Commitment: who/what/when with owner + date.
 
   Compute:
   Total Score = average of the six core metrics:
   [Opening Pitch Score, Product Pitch Score, Cross-Sell / Opportunity Handling, Closing Effectiveness, Negotiation Strength, Rebuttal Handling]
   % Score = round(Total Score * 10) with % sign omitted (just number).
 
-  ### OUTPUT SCHEMA (STRICT) — return exactly these keys
-  {"Date": "", "POC Name": "", "Society Name": "", "Visit Type": "", "Meeting Type": "", "Amount Value": "", "Months": "", "Deal Status": "", "Vendor Leads": "", "Society Leads": "", "Opening Pitch Score": "", "Product Pitch Score": "", "Cross-Sell / Opportunity Handling": "", "Closing Effectiveness": "", "Negotiation Strength": "", "Overall Sentiment": "", "Total Score": "", "% Score": "", "Risks / Unresolved Issues": "", "Improvements Needed": "", "Owner": "{owner_name}", "Email Id": "", "Kibana ID": "", "Manager": "", "Manager Email": "", "Product Pitch": "", "Team": "", "Media Link": "", "Doc Link": "", "Suggestions & Missed Topics": "", "Pre-meeting brief": "", "Meeting duration (min)": "", "Rebuttal Handling": "", "Rapport Building": "", "Improvement Areas": "", "Product Knowledge Displayed": "", "Call Effectiveness and Control": "", "Next Step Clarity and Commitment": "", "Missed Opportunities": "", "Key Discussion Points": "", "Key Questions": "", "Competition Discussion": "", "Action items": "", "Positive Factors": "", "Negative Factors": "", "Customer Needs": "", "Overall Client Sentiment": "", "Feature Checklist Coverage": ""}
+  ### EVIDENCE DISCIPLINE
+  For each scored metric and for every key extraction (risks, actions, objections, questions, competition), include minimal evidence objects with: "quote", "start_time", "end_time". If timestamps are unavailable, use "".
 
-  ### ADDITIONAL REQUIRED FIELDS (nested; for internal QA)
-  Add these keys at the end:
-  "evidence": { "Opening Pitch Score": [{"quote":"", "start_time":"", "end_time":""}], "Product Pitch Score": [{"quote":"", "start_time":"", "end_time":""}], "Closing Effectiveness": [{"quote":"", "start_time":"", "end_time":""}], "Risks": [{"quote":"", "start_time":"", "end_time":""}], "Action items": [{"quote":"", "start_time":"", "end_time":""}]},
+  ### OBJECTION TAXONOMY (classify when present)
+  ["Price/Charges", "Payment/Settlement Timing", "Feature Gap", "Integration/Tally/GST/TDS", "Training/Adoption", "Data Migration", "Security/Compliance", "Support/SLAs", "Contract/Terms"]
+
+  ### FEATURE CHECKLIST COVERAGE
+  Match only what the rep or client explicitly discussed (ERP/ASP). Return:
+  - feature_list: array of mentioned features (verbatim short labels)
+  - coverage_pct: integer 0–100 = (mentioned_features / 20) * 100, capped 100
+  (Use a 20-item internal reference set from Product Context; count each once.)
+
+  ### OUTPUT SCHEMA (STRICT) — return exactly these keys, no newlines or extra spaces in keys.
+  {{"Date": "", "POC Name": "", "Society Name": "", "Visit Type": "", "Meeting Type": "", "Amount Value": "", "Months": "", "Deal Status": "", "Vendor Leads": "", "Society Leads": "", "Opening Pitch Score": "", "Product Pitch Score": "", "Cross-Sell / Opportunity Handling": "", "Closing Effectiveness": "", "Negotiation Strength": "", "Overall Sentiment": "", "Total Score": "", "% Score": "", "Risks / Unresolved Issues": "", "Improvements Needed": "", "Owner": "{owner_name}", "Email Id": "", "Kibana ID": "", "Manager": "", "Product Pitch": "", "Team": "", "Media Link": "", "Doc Link": "", "Suggestions & Missed Topics": "", "Pre-meeting brief": "", "Meeting duration (min)": "", "Rebuttal Handling": "", "Rapport Building": "", "Improvement Areas": "", "Product Knowledge Displayed": "", "Call Effectiveness and Control": "", "Next Step Clarity and Commitment": "", "Missed Opportunities": "", "Key Discussion Points": "", "Key Questions": "", "Competition Discussion": "", "Action items": "", "Positive Factors": "", "Negative Factors": "", "Customer Needs": "", "Overall Client Sentiment": "", "Feature Checklist Coverage": ""}}
+
+  ### ADDITIONAL REQUIRED FIELDS (nested; append to end of JSON)
+  Add these 4 keys at the end (not in sheets; for internal QA):
+  "evidence": {{ "Opening Pitch Score": [], "Product Pitch Score": [], "Cross-Sell / Opportunity Handling": [], "Closing Effectiveness": [], "Negotiation Strength": [], "Rebuttal Handling": [], "Risks": [], "Action items": [], "Key Questions": [], "Competition Discussion": [] }},
   "objection_categories": [],
-  "coaching": { "what_went_well": [], "improve_next_time": [] },
-  "feature_checklist_detail": { "feature_list": [], "coverage_pct": 0 }
+  "coaching": {{ "what_went_well": [], "improve_next_time": [], "next_step_template": "Owner: {{owner_name}} will <action> by <date> with <stakeholder>; success metric: <metric>." }},
+  "feature_checklist_detail": {{ "feature_list": [], "coverage_pct": 0 }}
 
   ### VALIDATION RULES
   - Use only transcript facts. If unknown → "".
