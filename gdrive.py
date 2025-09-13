@@ -1,51 +1,23 @@
 import logging
 import io
-import json
-import os
-from typing import Dict, Tuple, Optional, List, Set
+from typing import Dict, List, Set
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # =======================
-# Authentication
+# Constants
 # =======================
-def authenticate_google_services() -> Tuple[Optional[object], Optional[object]]:
-    """Authenticates with Google services using environment variables."""
-    logging.info("Attempting to authenticate with Google services...")
-    try:
-        gcp_key_str = os.environ.get("GCP_SA_KEY")
-        if not gcp_key_str:
-            logging.error("CRITICAL: GCP_SA_KEY environment variable not found.")
-            return None, None
-
-        creds_info = json.loads(gcp_key_str)
-        scopes = [
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/spreadsheets",
-        ]
-        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
-
-        drive_service = build("drive", "v3", credentials=creds)
-        gsheets_client = build("sheets", "v4", credentials=creds) # Using googleapiclient for consistency
-
-        logging.info("SUCCESS: Authentication with Google services complete.")
-        return drive_service, gsheets_client
-    except Exception as e:
-        logging.error(f"CRITICAL: Authentication failed: {e}")
-        return None, None
+RETRY_CONFIG = {
+    'wait': wait_exponential(multiplier=2, min=5, max=60),
+    'stop': stop_after_attempt(5),
+    'reraise': True, # Re-raise the exception after the final attempt
+}
 
 # =======================
 # Folder & File Operations with Retry Logic
 # =======================
-RETRY_CONFIG = {
-    'wait': wait_exponential(multiplier=1, min=4, max=60),
-    'stop': stop_after_attempt(5),
-}
-
 @retry(**RETRY_CONFIG)
 def discover_team_folders(drive_service, parent_folder_id: str) -> Dict[str, str]:
     """Dynamically discovers city and then team member subfolders."""
@@ -59,7 +31,13 @@ def discover_team_folders(drive_service, parent_folder_id: str) -> Dict[str, str
         logging.warning("No city subfolders found inside the parent folder.")
         return {}
 
+    # Filter out common utility folders from being treated as city folders
+    utility_folders = ["processed meetings", "quarantined meetings"]
+    
     for city in city_folders:
+        if city['name'].lower() in utility_folders:
+            continue
+            
         logging.info(f"Found city folder: {city['name']}")
         member_query = f"'{city['id']}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         member_folders = drive_service.files().list(q=member_query, fields="files(id, name)").execute().get('files', [])
@@ -132,7 +110,4 @@ def quarantine_file(drive_service, file_id: str, source_folder_id: str, error_me
 
     # 2. Move the file
     move_file(drive_service, file_id, source_folder_id, quarantine_folder_id)
-
-
-
 
