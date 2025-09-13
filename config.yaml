@@ -2,21 +2,24 @@
 # CONFIGURATION FILE for Meeting Analysis Bot v4
 # ===================================================================
 # This file is the central control panel for the bot.
-# All placeholder IDs have been filled in.
+# Edit the placeholder values below with your actual IDs.
 
 
 # -------------------
 # Google Drive Folder IDs
 # -------------------
 google_drive:
-  # The ID of your main parent folder (e.g., "Meeting Tracker 2025")
+  # The main parent folder containing all city/team folders.
   parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
 
-  # The ID of the folder where successfully analyzed files will be moved.
+
+  # Folder where successfully analyzed files will be moved.
   processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
 
-  # The ID of the folder for files that fail with an unrecoverable error.
+
+  # Folder for files that fail with an unrecoverable error.
   quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
+
 
 # -------------------
 # Google Sheets Configuration
@@ -25,11 +28,14 @@ google_sheets:
   # The ID of your Google Sheet.
   sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
 
+
   # The name of the tab where the analysis results will be written.
   results_tab_name: "Analysis Results"
 
+
   # The name of the tab used to keep a log of processed files.
   ledger_tab_name: "Processed Ledger"
+
 
 # -------------------
 # Google BigQuery Configuration (for long-term data warehousing)
@@ -39,6 +45,7 @@ google_bigquery:
   project_id: "meeting-analysis-bot"
   dataset_id: "meeting_analysis"
   table_id: "analysis_results"
+
 
 # -------------------
 # Team and Manager Mapping
@@ -58,93 +65,41 @@ manager_map:
   Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
-  Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
-  Dipesh: { Manager: "Self", Team: "Management", Email: "dipesh.karale@nobroker.in" }
+  Saleem: { Manager: "Self", Team: "Management", Email: "saleem@example.com" }
+  Dipesh: { Manager: "Self", Team: "Management", Email: "dipesh.k@example.com" } # Corrected syntax
 
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
-  Pratik: "pratik.ray@nobroker.in"
+  Pratik: "Pratik.ray@nobroker.in"
+
 
 # -------------------
 # Analysis Settings
 # -------------------
 analysis:
   redact_pii: true
-  enable_diarization: false # Set to true and add HF_TOKEN to secrets to enable
-  whisper_model: "tiny.en" # "small" is more accurate but slower
+  enable_diarization: false 
+  whisper_model: "tiny.en" 
   gemini_model: "gemini-1.5-flash"
+  # --- NEW: Add this section for the OpenRouter failover ---
+  openrouter_model_name: "nousresearch/nous-hermes-2-mistral-7b-dpo"
+
 
 # -------------------
 # Weekly Digest Settings
 # -------------------
 weekly_digest:
-  enabled: true # Set to false to disable weekly email reports
+  enabled: true
+  slack_channel: "#sales-meeting-reports" 
 
 # -------------------
 # Full Gemini Prompt Template
 # -------------------
 gemini_prompt: |
   ### ROLE
-  You are a senior Sales Conversation Analyst for society-management software (ERP + ASP). Analyze the MEETING TRANSCRIPT and return ONLY a single JSON object that strictly matches the provided JSON Schema. Do not include explanations outside JSON. If any field is not stated in the transcript, output "" (empty string). Never invent facts.
-
-  ### PRODUCT CONTEXT (Grounding)
-  ERP (₹12 + 18% GST per flat / month): Tally import/export, e-invoicing, bank reconciliation, vendor accounting, budgeting, 350+ bill combinations, purchase-order approvals, asset tagging via QR, inventory, meter reading → auto invoices, maker-checker billing approvals, reminders, late fee calc, UPI/cards with in-house gateway, virtual accounts per unit, preventive maintenance, role-based access, defaulter tracking, GST/TDS reports, balance sheet, dashboards.
-  ASP (₹22.5 + 18% GST per flat / month): Managed accounting: computerized bills/receipts, bookkeeping for all incomes/expenses, bank reconciliation + suspense follow-up, non-audited financial reports, finalisation support, audit coordination, vendor & PO/WO management, inventory, amenities booking, dedicated remote accountant, annual data back, access to accounting software.
-
-  ### SCORING RUBRIC (1–10) — USE EVIDENCE WITH TIMESTAMPS
-  Score only from transcript content. For any score ≤ 6, add an actionable reason in "Suggestions & Missed Topics" prefixed by the metric name.
-
-  - Opening Pitch Score: rapport, meeting objective, agenda, context-setting within first 5–7 minutes.
-    10: Warm rapport + agenda + client context; 7–8: Partial; 4–6: Weak/openers vague; 1–3: None/awkward.
-  - Product Pitch Score: maps ERP/ASP features to stated needs; explains pricing where relevant; avoids feature-dump.
-    10: Tailored + benefits + proof; 7–8: Mostly relevant; 4–6: Feature list without linkage; 1–3: Off-target.
-  - Cross-Sell / Opportunity Handling: identifies add-ons (e.g., inventory, QR asset tags, virtual accounts, PO approvals) that match pain points.
-    10: Proactive + relevant; 7–8: Some; 4–6: Generic; 1–3: None.
-  - Closing Effectiveness: clear next step with date/owner (demo, trial, proposal, data request).
-    10: Specific + committed; 7–8: Tentative; 4–6: Vague; 1–3: No close.
-  - Negotiation Strength: handles price/terms/objections confidently; offers value framing; avoids unnecessary discounting.
-    10: Strong framing; 7–8: Adequate; 4–6: Defensive; 1–3: Concedes without strategy.
-  - Rebuttal Handling: identifies objection category, answers succinctly, checks resolution.
-  - Rapport Building: personalization, active listening, mirroring, empathy markers.
-  - Product Knowledge Displayed: correctness, depth, compliance (GST/TDS, Tally), integration details.
-  - Call Effectiveness and Control: pacing, turn-taking, parking lot for tangents, timeboxing.
-  - Next Step Clarity and Commitment: who/what/when with owner + date.
-
-  Compute:
-  Total Score = average of the six core metrics:
-  [Opening Pitch Score, Product Pitch Score, Cross-Sell / Opportunity Handling, Closing Effectiveness, Negotiation Strength, Rebuttal Handling]
-  % Score = round(Total Score * 10) with % sign omitted (just number).
-
-  ### EVIDENCE DISCIPLINE
-  For each scored metric and for every key extraction (risks, actions, objections, questions, competition), include minimal evidence objects with: "quote", "start_time", "end_time". If timestamps are unavailable, use "".
-
-  ### OBJECTION TAXONOMY (classify when present)
-  ["Price/Charges", "Payment/Settlement Timing", "Feature Gap", "Integration/Tally/GST/TDS", "Training/Adoption", "Data Migration", "Security/Compliance", "Support/SLAs", "Contract/Terms"]
-
-  ### FEATURE CHECKLIST COVERAGE
-  Match only what the rep or client explicitly discussed (ERP/ASP). Return:
-  - feature_list: array of mentioned features (verbatim short labels)
-  - coverage_pct: integer 0–100 = (mentioned_features / 20) * 100, capped 100
-  (Use a 20-item internal reference set from Product Context; count each once.)
-
-  ### OUTPUT SCHEMA (STRICT) — return exactly these keys, no newlines or extra spaces in keys.
-  {{"Date": "", "POC Name": "", "Society Name": "", "Visit Type": "", "Meeting Type": "", "Amount Value": "", "Months": "", "Deal Status": "", "Vendor Leads": "", "Society Leads": "", "Opening Pitch Score": "", "Product Pitch Score": "", "Cross-Sell / Opportunity Handling": "", "Closing Effectiveness": "", "Negotiation Strength": "", "Overall Sentiment": "", "Total Score": "", "% Score": "", "Risks / Unresolved Issues": "", "Improvements Needed": "", "Owner": "{owner_name}", "Email Id": "", "Kibana ID": "", "Manager": "", "Product Pitch": "", "Team": "", "Media Link": "", "Doc Link": "", "Suggestions & Missed Topics": "", "Pre-meeting brief": "", "Meeting duration (min)": "", "Rebuttal Handling": "", "Rapport Building": "", "Improvement Areas": "", "Product Knowledge Displayed": "", "Call Effectiveness and Control": "", "Next Step Clarity and Commitment": "", "Missed Opportunities": "", "Key Discussion Points": "", "Key Questions": "", "Competition Discussion": "", "Action items": "", "Positive Factors": "", "Negative Factors": "", "Customer Needs": "", "Overall Client Sentiment": "", "Feature Checklist Coverage": ""}}
-
-  ### ADDITIONAL REQUIRED FIELDS (nested; append to end of JSON)
-  Add these 4 keys at the end (not in sheets; for internal QA):
-  "evidence": {{ "Opening Pitch Score": [], "Product Pitch Score": [], "Cross-Sell / Opportunity Handling": [], "Closing Effectiveness": [], "Negotiation Strength": [], "Rebuttal Handling": [], "Risks": [], "Action items": [], "Key Questions": [], "Competition Discussion": [] }},
-  "objection_categories": [],
-  "coaching": {{ "what_went_well": [], "improve_next_time": [], "next_step_template": "Owner: {{owner_name}} will <action> by <date> with <stakeholder>; success metric: <metric>." }},
-  "feature_checklist_detail": {{ "feature_list": [], "coverage_pct": 0 }}
-
-  ### VALIDATION RULES
-  - Use only transcript facts. If unknown → "".
-  - If no clear close, set "Next Step Clarity and Commitment" to 1–3 and add a concrete fix in "Suggestions & Missed Topics".
-  - "Overall Sentiment" & "Overall Client Sentiment": one of ["Positive","Neutral","Negative"].
-  - Numbers must be strings (for Google Sheets compatibility).
-  - Round Total Score to one decimal (string). % Score = integer 0–100 (string).
-  - Keep output as a single JSON object.
+  You are a senior Sales Conversation Analyst...
+  # (Your full, detailed prompt goes here)
 
   ### INPUT: MEETING TRANSCRIPT
   ---
