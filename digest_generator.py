@@ -12,7 +12,7 @@ from google.oauth2 import service_account
 from google.cloud import bigquery
 import google.generativeai as genai
 
-# Import the new email formatter
+# Import email formatter (with charts)
 import email_formatter
 
 # =======================
@@ -37,17 +37,16 @@ def get_bigquery_client(config: Dict, gcp_key_str: str) -> bigquery.Client:
         raise
 
 # =======================
-# Data Fetching from BigQuery
+# Data Fetching
 # =======================
 def fetch_manager_data(bq_client: bigquery.Client, table_ref: str, manager_name: str) -> List[Dict]:
-    """Fetches all performance data for a specific manager's team from the last 7 days."""
+    """Fetches performance data for a manager's team (last 7 days + previous week)."""
     query = f"""
         WITH weekly_data AS (
             SELECT
                 Owner, Team,
                 SAFE_CAST(NULLIF(TRIM(Percent_Score), '') AS NUMERIC) AS Percent_Score,
                 SAFE_CAST(NULLIF(TRIM(Amount_Value), '') AS NUMERIC) AS Amount_Value,
-                -- Adjust the parsing format if your Date column isn't '%Y/%m/%d'
                 SAFE.PARSE_DATETIME('%Y/%m/%d', Date) AS meeting_date
             FROM `{table_ref}`
             WHERE Manager = '{manager_name}'
@@ -73,7 +72,6 @@ def fetch_manager_data(bq_client: bigquery.Client, table_ref: str, manager_name:
         LEFT JOIN previous_week pw ON cw.Owner = pw.Owner
     """
     try:
-        logging.info(f"Fetching data for manager: {manager_name}")
         query_job = bq_client.query(query)
         results = [dict(row) for row in query_job.result()]
         logging.info(f"Found {len(results)} records for {manager_name}.")
@@ -83,14 +81,14 @@ def fetch_manager_data(bq_client: bigquery.Client, table_ref: str, manager_name:
         return []
 
 # =======================
-# Data Processing & Aggregation
+# Data Processing
 # =======================
-def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List, List]:
-    """Aggregates raw data into KPIs, a team performance list, and coaching notes."""
+def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List[Dict], List[Dict]]:
+    """Aggregates raw data into KPIs, team performance list, and coaching notes."""
     total_meetings = len(team_records)
-    total_pipeline = sum(r.get("Amount_Value") or 0 for r in team_records)
+    total_pipeline = sum(r["Amount_Value"] for r in team_records if r.get("Amount_Value"))
     avg_score = (
-        sum(r.get("Percent_Score") or 0 for r in team_records) / total_meetings
+        sum(r["Percent_Score"] for r in team_records if r.get("Percent_Score")) / total_meetings
         if total_meetings > 0
         else 0
     )
@@ -102,17 +100,16 @@ def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List, List]:
     }
 
     team_performance = []
-    reps = sorted({r["Owner"] for r in team_records if r.get("Owner")})
+    reps = sorted(set(r["Owner"] for r in team_records))
     for rep in reps:
         rep_meetings = [r for r in team_records if r["Owner"] == rep]
         rep_avg_score = (
-            sum(r.get("Percent_Score") or 0 for r in rep_meetings) / len(rep_meetings)
+            sum(r["Percent_Score"] for r in rep_meetings if r.get("Percent_Score")) / len(rep_meetings)
             if rep_meetings
             else 0
         )
-        rep_pipeline = sum(r.get("Amount_Value") or 0 for r in rep_meetings)
-
-        prev_scores = [r.get("prev_week_avg_score") for r in rep_meetings if r.get("prev_week_avg_score") is not None]
+        rep_pipeline = sum(r["Amount_Value"] for r in rep_meetings if r.get("Amount_Value"))
+        prev_scores = [r["prev_week_avg_score"] for r in rep_meetings if r.get("prev_week_avg_score")]
         avg_prev_score = sum(prev_scores) / len(prev_scores) if prev_scores else rep_avg_score
         score_change = rep_avg_score - avg_prev_score
 
@@ -126,84 +123,70 @@ def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List, List]:
             }
         )
 
-    # Placeholder for more advanced coaching note generation
-    coaching_notes = []
-
+    coaching_notes = []  # Can add advanced logic later
     return kpis, sorted(team_performance, key=lambda x: x["avg_score"], reverse=True), coaching_notes
 
 # =======================
-# AI Summary Generation
+# AI Summary
 # =======================
 def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], config: Dict) -> str:
-    """Uses Gemini to generate a high-level executive summary."""
+    """Uses Gemini to generate a 2–3 sentence executive summary."""
     logging.info(f"Generating AI summary for {manager_name}...")
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
         logging.error("GEMINI_API_KEY not set. Cannot generate AI summary.")
-        return "AI summary could not be generated due to a configuration error."
+        return "AI summary could not be generated."
 
     genai.configure(api_key=gemini_key)
     model = genai.GenerativeModel(config["analysis"]["gemini_model"])
 
     prompt = f"""
-    You are a senior sales analyst providing a weekly summary to a manager named {manager_name}.
-    Based on the following data for their team's performance over the last 7 days, write a concise, 2-3 sentence executive summary.
-    Focus on the most important trend, biggest success, or most critical area for improvement. Be direct and data-driven.
+    You are a senior sales analyst providing a weekly summary to {manager_name}.
+    Based on the following data for their team's performance over the last 7 days, write a concise, 2–3 sentence executive summary.
+    Focus on the most important trend, biggest success, or critical area for improvement.
 
-    **Key KPIs:**
+    KPIs:
     - Total Meetings: {kpis['total_meetings']}
-    - Team Average Score: {kpis['avg_score']:.1f}%
-    - Total Pipeline Value: {email_formatter.format_currency(kpis['total_pipeline'])}
+    - Team Avg Score: {kpis['avg_score']:.1f}%
+    - Pipeline Value: {email_formatter.format_currency(kpis['total_pipeline'])}
 
-    **Individual Performance:**
+    Team Performance:
     {json.dumps(team_data, indent=2)}
 
-    **Your Summary:**
+    Summary:
     """
     try:
         response = model.generate_content(prompt)
-        logging.info("Successfully generated AI summary.")
-
-        # Safer response parsing
-        if hasattr(response, "text") and response.text:
-            return response.text.strip()
-        elif hasattr(response, "candidates") and response.candidates:
-            parts = response.candidates[0].content.parts
-            return parts[0].text.strip() if parts else "Summary unavailable."
-        else:
-            return "Summary unavailable."
+        return response.text.strip()
     except Exception as e:
-        logging.error(f"Failed to generate AI summary: {e}")
-        return "An AI-powered summary could not be generated for this week's data."
+        logging.error(f"AI summary failed: {e}")
+        return "AI summary not available."
 
 # =======================
 # Email Sending
 # =======================
 def send_email(subject: str, html_content: str, recipient: str):
-    """Sends the HTML report via email using secrets."""
-    sender_email = os.environ.get("MAIL_USERNAME")
+    """Sends the digest email."""
+    sender = os.environ.get("MAIL_USERNAME")
     password = os.environ.get("MAIL_PASSWORD")
 
-    if not sender_email or not password:
-        logging.warning("MAIL_USERNAME or MAIL_PASSWORD not set. Skipping actual email sending.")
-        print("\n--- EMAIL PREVIEW ---")
-        print(f"TO: {recipient}")
-        print(f"SUBJECT: {subject}")
-        print(f"BODY (truncated): {html_content[:500]}...\n")
+    if not sender or not password:
+        logging.warning("MAIL_USERNAME or MAIL_PASSWORD not set. Skipping email send.")
+        print("\n--- EMAIL CONTENT PREVIEW ---\n")
+        print(f"TO: {recipient}\nSUBJECT: {subject}\n{html_content[:500]}...\n")
         return
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = sender_email
+    msg["From"] = sender
     msg["To"] = recipient
     msg.attach(MIMEText(html_content, "html"))
 
     try:
-        logging.info(f"Connecting to SMTP server to send email to {recipient}...")
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, password)
-            server.sendmail(sender_email, recipient, msg.as_string())
-        logging.info("SUCCESS: Email sent.")
+            server.login(sender, password)
+            server.sendmail(sender, recipient, msg.as_string())
+        logging.info(f"SUCCESS: Email sent to {recipient}")
     except Exception as e:
         logging.error(f"ERROR: Failed to send email: {e}")
 
@@ -211,49 +194,42 @@ def send_email(subject: str, html_content: str, recipient: str):
 # Main
 # =======================
 def main():
-    """Generates and sends the weekly digest reports to each manager."""
     logging.info("--- Starting Weekly Digest Generator ---")
 
-    config_path = "config.yaml" if os.path.exists("config.yaml") else "config.yml"
-    with open(config_path, "r") as f:
+    with open("config.yaml", "r") as f:
         config = yaml.safe_load(f)
 
-    if not config.get("weekly_digest", {}).get("enabled"):
-        logging.info("Weekly digest is disabled in config. Exiting.")
+    if not config.get("weekly_digest", {}).get("enabled", False):
+        logging.info("Weekly digest disabled in config.yaml. Exiting.")
         return
 
     gcp_key_str = os.environ.get("GCP_SA_KEY")
-    if not gcp_key_str:
-        logging.error("GCP_SA_KEY not set. Exiting.")
-        return
-
     bq_client = get_bigquery_client(config, gcp_key_str)
 
     table_ref = f"{bq_client.project}.{config['google_bigquery']['dataset_id']}.{config['google_bigquery']['table_id']}"
 
     manager_emails = config.get("manager_emails", {})
     if not manager_emails:
-        logging.warning("No managers defined in config. Nothing to do.")
+        logging.warning("No managers defined. Exiting.")
         return
 
-    for manager_name, manager_email in manager_emails.items():
-        logging.info(f"--- Generating report for {manager_name} ---")
-
-        team_records = fetch_manager_data(bq_client, table_ref, manager_name)
+    for manager, email in manager_emails.items():
+        logging.info(f"--- Generating digest for {manager} ---")
+        team_records = fetch_manager_data(bq_client, table_ref, manager)
 
         if not team_records:
-            logging.info(f"No new meeting data for {manager_name}'s team this week. Skipping report.")
+            logging.info(f"No data for {manager} this week.")
             continue
 
         kpis, team_data, coaching_notes = process_team_data(team_records)
-        ai_summary = generate_ai_summary(manager_name, kpis, team_data, config)
+        ai_summary = generate_ai_summary(manager, kpis, team_data, config)
 
-        email_html = email_formatter.create_manager_digest_email(
-            manager_name, kpis, team_data, coaching_notes, ai_summary
+        html_email = email_formatter.create_manager_digest_email(
+            manager, kpis, team_data, coaching_notes, ai_summary
         )
 
-        subject = f"Your Team's Weekly Meeting Analysis Summary ({time.strftime('%b %d')})"
-        send_email(subject, email_html, manager_email)
+        subject = f"Weekly Meeting Digest | {manager} | {time.strftime('%b %d, %Y')}"
+        send_email(subject, html_email, email)
 
     logging.info("--- Weekly Digest Generator Finished ---")
 
