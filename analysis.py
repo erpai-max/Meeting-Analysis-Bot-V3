@@ -26,7 +26,7 @@ def redact_pii(transcript: str) -> str:
 # =======================
 def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config: Dict) -> Optional[Tuple[str, float]]:
     """Transcribes audio and returns transcript and duration."""
-    import tempfile # Import here to keep it self-contained
+    import tempfile 
     logging.info("Starting transcription process...")
     whisper_model = config['analysis']['whisper_model']
     
@@ -49,7 +49,7 @@ def transcribe_audio(file_content: 'io.BytesIO', original_filename: str, config:
         logging.info(f"Cleaned up temporary file: {temp_file_path}")
 
 # =======================
-# Data Normalization (Upgraded)
+# Data Normalization
 # =======================
 SIX_CORE = [
     "Opening Pitch Score",
@@ -71,7 +71,7 @@ def normalize_record(rec: Dict):
     if not rec:
         return {}
 
-    # THIS IS THE FIX: Create a new dictionary with cleaned keys (removes spaces/newlines)
+    # Clean keys by stripping whitespace and newlines
     cleaned_rec = {str(k).strip(): v for k, v in rec.items()}
 
     # Recompute Total and % Score for consistency
@@ -103,48 +103,32 @@ def normalize_record(rec: Dict):
 def analyze_transcript(transcript: str, owner_name: str, config: Dict):
     """Analyzes transcript with Gemini using the prompt from config.yaml."""
     logging.info("Starting analysis with Gemini...")
-
+    
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
         logging.error("CRITICAL: GEMINI_API_KEY environment variable not found.")
         return None
-
+        
     genai.configure(api_key=gemini_key)
-
+    
     prompt_template = config.get('gemini_prompt', '')
     if not prompt_template:
         logging.error("CRITICAL: gemini_prompt not found in config.yaml.")
         return None
-
+        
     prompt = prompt_template.format(owner_name=owner_name, transcript=transcript)
-
+    
     try:
         model = genai.GenerativeModel(config['analysis']['gemini_model'])
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-
-        # --- Clean and parse Gemini response ---
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-
-        try:
-            raw_json = json.loads(clean_text)
-        except Exception as e:
-            logging.error(f"JSON parsing failed: {e}. Raw output was: {clean_text[:300]}...")
-            return None
-
-        # --- Ensure all required headers are present ---
-        required_headers = config.get("sheets_headers", [])
-        for header in required_headers:
-            if header not in raw_json:
-                raw_json[header] = ""
-
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        
+        clean_json_string = response.text.replace('```json', '').replace('```', '').strip()
+        raw_json = json.loads(clean_json_string)
+        
         normalized_data = normalize_record(raw_json)
-
+        
         logging.info("SUCCESS: Analysis with Gemini complete and data normalized.")
         return normalized_data
-
     except google_exceptions.ResourceExhausted as e:
         logging.error(f"ERROR: Gemini API analysis failed with 429 Quota Exceeded: {e}")
         return "RATE_LIMIT_EXCEEDED"
@@ -174,7 +158,7 @@ def enrich_data_from_context(analysis_data: Dict, member_name: str, file: Dict, 
 
     # 2. Enrich from file metadata
     analysis_data['Media Link'] = file.get('webViewLink', '')
-    if duration_seconds and not analysis_data.get('Meeting duration (min)'):
+    if duration_seconds and not str(analysis_data.get('Meeting duration (min)', '')).strip():
         analysis_data['Meeting duration (min)'] = f"{duration_seconds / 60:.2f}"
 
     # 3. Enrich from filename if AI analysis returns an empty value
