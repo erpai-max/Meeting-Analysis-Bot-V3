@@ -4,6 +4,7 @@
 # This file is the central control panel for the bot.
 # Edit the placeholder values below with your actual IDs.
 
+
 # -------------------
 # Google Drive Folder IDs
 # -------------------
@@ -17,6 +18,7 @@ google_drive:
   # The ID of the folder for files that fail with an unrecoverable error.
   quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
 
+
 # -------------------
 # Google Sheets & BigQuery
 # -------------------
@@ -29,6 +31,7 @@ google_bigquery:
   project_id: "meeting-analysis-bot" # Your Google Cloud Project ID
   dataset_id: "meeting_analysis"
   table_id: "analysis_results"
+
 
 # -------------------
 # Team and Manager Mappings
