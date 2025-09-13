@@ -1,5 +1,5 @@
 # ===================================================================
-# CONFIGURATION FILE for Meeting Analysis Bot v4
+# CONFIGURATION FILE for Meeting Analysis Bot v4.1
 # ===================================================================
 # This file is the central control panel for the bot.
 # Edit the placeholder values below with your actual IDs.
@@ -9,17 +9,14 @@
 # Google Drive Folder IDs
 # -------------------
 google_drive:
-  # The main parent folder containing all city/team folders.
+  # The ID of your main parent folder (e.g., "Meeting Tracker 2025")
   parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
 
-
-  # Folder where successfully analyzed files will be moved.
+  # The ID of the folder where successfully analyzed files will be moved.
   processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
 
-
-  # Folder for files that fail with an unrecoverable error.
+  # The ID of the folder for files that fail with an unrecoverable error.
   quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
-
 
 # -------------------
 # Google Sheets Configuration
@@ -28,14 +25,11 @@ google_sheets:
   # The ID of your Google Sheet.
   sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
 
-
   # The name of the tab where the analysis results will be written.
   results_tab_name: "Analysis Results"
 
-
   # The name of the tab used to keep a log of processed files.
   ledger_tab_name: "Processed Ledger"
-
 
 # -------------------
 # Google BigQuery Configuration (for long-term data warehousing)
@@ -45,7 +39,6 @@ google_bigquery:
   project_id: "meeting-analysis-bot"
   dataset_id: "meeting_analysis"
   table_id: "analysis_results"
-
 
 # -------------------
 # Team and Manager Mapping
@@ -65,44 +58,57 @@ manager_map:
   Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
-  Saleem: { Manager: "Self", Team: "Management", Email: "saleem@example.com" }
-  Dipesh: { Manager: "Self", Team: "Management", Email: "dipesh.k@example.com" } # Corrected syntax
+  Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
+  Dipesh: { Manager: "Self", Team: "Management", Email: "dipesh.karale@nobroker.in" }
 
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
   Pratik: "Pratik.ray@nobroker.in"
 
+# -------------------
+# Headers for Sheets & BigQuery
+# -------------------
+sheets_headers:
+  - Date
+  - POC Name
+  - Society Name
+  # ... [and so on for all 48 headers] ...
+  - Manager Email
+  - Feature Checklist Coverage
 
 # -------------------
 # Analysis Settings
 # -------------------
 analysis:
   redact_pii: true
-  enable_diarization: false 
-  whisper_model: "tiny.en" 
+  enable_diarization: false
+  whisper_model: "tiny.en"
   gemini_model: "gemini-1.5-flash"
-  # --- NEW: Add this section for the OpenRouter failover ---
   openrouter_model_name: "nousresearch/nous-hermes-2-mistral-7b-dpo"
-
 
 # -------------------
 # Weekly Digest Settings
 # -------------------
 weekly_digest:
   enabled: true
-  slack_channel: "#sales-meeting-reports" 
 
 # -------------------
-# Full Gemini Prompt Template
+# Full Gemini Prompt Template (Upgraded)
 # -------------------
 gemini_prompt: |
   ### ROLE
-  You are a senior Sales Conversation Analyst...
-  # (Your full, detailed prompt goes here)
+  You are a senior Sales Conversation Analyst... [Your full prompt here]
 
-  ### INPUT: MEETING TRANSCRIPT
-  ---
-  {transcript}
-  ---
+  ### TASK ###
+  Analyze the provided transcript... For the fields below, synthesize insights and format them as a bulleted list within a single string (e.g., "- Point 1\n- Point 2").
+  - **Key Discussion Points:** Summarize the main topics.
+  - **Customer Needs:** Infer the client's underlying business problems or pain points, even if not stated directly.
+  - **Positive Factors:** List what the sales rep did well.
+  - **Negative Factors:** List what the sales rep did poorly.
+  - **Missed Opportunities:** What could the rep have asked or pitched to create more value?
+  - **Action items:** Extract any commitments with a clear owner and timeline.
+
+  ### OUTPUT SCHEMA (STRICT)
+  { "Date": "", "POC Name": "", ... "Feature Checklist Coverage": "" }
 
