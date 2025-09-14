@@ -29,3 +29,9 @@ tenacity>=8.2.3
 requests>=2.31.0
 pandas>=2.1.0
 numpy>=1.26.0
+
+# -------------------
+# Visualization for Digest Emails
+# -------------------
+matplotlib>=3.7.2
+pillow>=10.0.0
