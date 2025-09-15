@@ -109,6 +109,7 @@ def retry_quarantined_files(drive_service, gsheets_client, config):
                             "Moved back for retry",
                             "Auto-retry after 1 day",
                             config,
+                            file_name,   # ✅ pass file_name
                         )
                     except Exception as e:
                         logging.error(
@@ -193,7 +194,7 @@ def main():
                             drive_service, file_id, folder_id, str(e), config
                         )
                         sheets.update_ledger(
-                            gsheets_client, file_id, "Quarantined", str(e), config
+                            gsheets_client, file_id, "Quarantined", str(e), config, file_name  # ✅ pass file_name
                         )
             except Exception as e:
                 logging.error(f"CRITICAL ERROR while processing {member_name}'s folder: {e}")
