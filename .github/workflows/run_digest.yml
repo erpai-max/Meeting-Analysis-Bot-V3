@@ -1,7 +1,7 @@
 name: Run Meeting Analysis Digest
 
 on:
-  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
+  workflow_dispatch: # Manual trigger from GitHub Actions tab
   schedule:
     # Runs at 04:00 UTC on Monday → 9:30 AM IST Monday morning
     - cron: '0 4 * * 1'
@@ -34,11 +34,15 @@ jobs:
 
       - name: Generate and Send Digest
         env:
+          # 🔑 Google Service Account JSON (base64 encoded in repo secrets)
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
+          # 🔑 AI keys (Gemini first, OpenRouter as fallback)
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} # Failover for Gemini
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+          # 🔑 Email sending credentials
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }} # Sender email
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }} # App Password for email
-        run: |
-          echo "🚀 Running Weekly Digest..."
-          python digest_generator.py || echo "⚠️ Digest script failed"
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }} # App Password (Gmail)
+
+        run: python digest_generator.py
