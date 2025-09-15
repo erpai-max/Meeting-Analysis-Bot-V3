@@ -18,15 +18,18 @@ def generate_chart_base64(team_data: List[Dict]) -> str:
     owners = [m.get("owner", "") for m in team_data]
     scores = [float(m.get("avg_score") or 0) for m in team_data]
 
+    if not owners:
+        return ""
+
     plt.figure(figsize=(6, 3))
-    plt.bar(owners, scores)
+    plt.bar(owners, scores, color="#3b82f6", alpha=0.8)
     plt.title("Average Score by Owner (Last 7 Days)")
     plt.ylabel("Score (%)")
     plt.xticks(rotation=30, ha="right")
 
     buf = io.BytesIO()
     plt.tight_layout()
-    plt.savefig(buf, format="png")
+    plt.savefig(buf, format="png", transparent=True)
     plt.close()
     buf.seek(0)
 
@@ -46,7 +49,7 @@ def generate_pipeline_chart_base64(team_data: List[Dict]) -> str:
 
     buf = io.BytesIO()
     plt.tight_layout()
-    plt.savefig(buf, format="png")
+    plt.savefig(buf, format="png", transparent=True)
     plt.close()
     buf.seek(0)
 
@@ -81,7 +84,9 @@ def create_manager_digest_email(
                 <td style="padding: 12px 16px;">{int(member.get('meetings') or 0)}</td>
                 <td style="padding: 12px 16px;">
                     {float(member.get('avg_score') or 0):.1f}% 
-                    <span style="color: {score_color}; font-size: 12px;">({score_icon} {abs(score_change):.1f}%)</span>
+                    <span style="color: {score_color}; font-size: 12px;">
+                        ({score_icon} {abs(score_change):.1f}% WoW)
+                    </span>
                 </td>
                 <td style="padding: 12px 16px;">{format_currency(member.get('pipeline'))}</td>
             </tr>
@@ -107,8 +112,14 @@ def create_manager_digest_email(
                 <ul style="list-style-type: none; padding: 0; margin: 0; font-size: 14px;">{"".join(items)}</ul>
             </div>
         """
+    else:
+        coaching_notes_html = """
+            <div style="background-color: #f9fafb; border-radius: 12px; padding: 16px; margin-top: 20px; text-align:center;">
+                <span style="font-size: 14px; color: #4b5563;">✅ No coaching notes this week</span>
+            </div>
+        """
 
-    # --- Charts (static images) ---
+    # --- Charts ---
     chart1 = generate_chart_base64(team_data)
     chart2 = generate_pipeline_chart_base64(team_data)
 
@@ -137,7 +148,7 @@ def create_manager_digest_email(
         <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
             <tr><td>
                 <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="600" align="center"
-                       style="margin:0 auto; background-color:#f9fafb; border-radius:16px; padding:32px;">
+                       style="margin:0 auto; background-color:#ffffff; border-radius:16px; padding:32px; box-shadow:0 2px 6px rgba(0,0,0,0.05);">
                     <tr><td>
                         <h1 style="font-size:24px; font-weight:800; color:#111827; margin:0;">Weekly Meeting Analysis</h1>
                         <p style="font-size:16px; color:#6b7280; margin:4px 0 0;">Strategic Summary for {html.escape(manager_name)}</p>
@@ -149,20 +160,20 @@ def create_manager_digest_email(
                     </td></tr>
                     <tr><td style="padding-top:20px;">🚀 <b>AI Summary:</b><br>{safe_summary}</td></tr>
                     <tr><td style="padding-top:20px;">🏆 <b>Team Performance:</b>
-                        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top:10px; font-size:14px;">
-                            <thead style="background-color:#f9fafb;">
+                        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top:10px; font-size:14px; border-collapse:collapse;">
+                            <thead style="background-color:#f3f4f6;">
                                 <tr>
-                                    <th align="left" style="padding:8px;">Owner</th>
-                                    <th align="left" style="padding:8px;">Meetings</th>
-                                    <th align="left" style="padding:8px;">Avg Score (% WoW)</th>
-                                    <th align="left" style="padding:8px;">Pipeline</th>
+                                    <th align="left" style="padding:8px; font-weight:600;">Owner</th>
+                                    <th align="left" style="padding:8px; font-weight:600;">Meetings</th>
+                                    <th align="left" style="padding:8px; font-weight:600;">Avg Score (% WoW)</th>
+                                    <th align="left" style="padding:8px; font-weight:600;">Pipeline</th>
                                 </tr>
                             </thead>
                             <tbody>{"".join(team_rows)}</tbody>
                         </table>
                     </td></tr>
-                    {f"<tr><td>{coaching_notes_html}</td></tr>" if coaching_notes_html else ""}
-                    {f"<tr><td>{chart_html}</td></tr>" if chart_html else ""}
+                    <tr><td>{coaching_notes_html}</td></tr>
+                    <tr><td>{chart_html}</td></tr>
                     <tr><td style="padding-top:32px; text-align:center; font-size:12px; color:#9ca3af;">
                         This is an automated report generated by the Meeting Analysis Bot.
                     </td></tr>
