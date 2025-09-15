@@ -1,144 +1,127 @@
-import logging
+import os
 import io
-from typing import Dict, List, Set
-
-from googleapiclient.errors import HttpError
+import logging
 from googleapiclient.http import MediaIoBaseDownload
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-import sheets  # ✅ Needed for ledger updates
-
-# =======================
-# Constants
-# =======================
-RETRY_CONFIG = {
-    'wait': wait_exponential(multiplier=2, min=5, max=60),
-    'stop': stop_after_attempt(5),
-    'reraise': True,
-}
-
-# =======================
-# Folder & File Operations with Retry Logic
-# =======================
-@retry(**RETRY_CONFIG)
-def discover_team_folders(drive_service, parent_folder_id: str) -> Dict[str, str]:
-    """Dynamically discovers city and then team member subfolders."""
-    team_folders = {}
-    logging.info(f"Starting folder discovery in parent folder: {parent_folder_id}")
-
-    city_query = f"'{parent_folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    city_folders = drive_service.files().list(q=city_query, fields="files(id, name)").execute().get('files', [])
-
-    if not city_folders:
-        logging.warning("No city subfolders found inside the parent folder.")
-        return {}
-
-    utility_folders = ["processed meetings", "quarantined meetings"]
-
-    for city in city_folders:
-        if city['name'].lower() in utility_folders:
-            continue
-
-        logging.info(f"Found city folder: {city['name']}")
-        member_query = f"'{city['id']}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        member_folders = drive_service.files().list(q=member_query, fields="files(id, name)").execute().get('files', [])
-
-        for member in member_folders:
-            logging.info(f"  - Discovered team member folder: {member['name']} (ID: {member['id']})")
-            team_folders[member['name']] = member['id']
-
-    logging.info(f"Folder discovery complete. Found {len(team_folders)} total team folders.")
-    return team_folders
-
-
-@retry(**RETRY_CONFIG)
-def get_files_to_process(drive_service, folder_id: str, processed_ids: Set[str]) -> List[Dict]:
-    """Gets all media files in a folder that are not already processed."""
-    files_to_process = []
-    query = f"'{folder_id}' in parents and trashed = false and (mimeType contains 'audio/' or mimeType contains 'video/')"
-    fields = "nextPageToken, files(id, name, mimeType, parents, webViewLink)"
-    page_token = None
-
-    while True:
-        response = drive_service.files().list(q=query, fields=fields, pageToken=page_token).execute()
-        for file_meta in response.get("files", []):
-            if file_meta['id'] not in processed_ids:
-                files_to_process.append(file_meta)
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-
-    return files_to_process
-
-
-@retry(**RETRY_CONFIG)
-def download_file(drive_service, file_id: str) -> io.BytesIO:
-    """Downloads a file's content into a BytesIO object."""
-    logging.info(f"Starting download for file ID: {file_id}")
-    request = drive_service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-        if status:
-            logging.info(f"Download progress: {int(status.progress() * 100)}%")
-    fh.seek(0)
-    logging.info("SUCCESS: File download complete.")
-    return fh
-
-
-@retry(**RETRY_CONFIG)
-def move_file(drive_service, file_id: str, source_folder_id: str, destination_folder_id: str):
-    """Moves a file safely from a source folder to a destination folder."""
-    logging.info(f"Moving file {file_id} from {source_folder_id} to {destination_folder_id}")
+# -----------------------
+# Download File
+# -----------------------
+def download_file(service, file_id: str, file_name: str = None) -> str:
+    """
+    Download a file from Google Drive by file_id.
+    Saves to /tmp and returns the local path.
+    """
     try:
-        # Fetch all parents
-        file = drive_service.files().get(fileId=file_id, fields="parents").execute()
-        prev_parents = ",".join(file.get("parents", []))
+        request = service.files().get_media(fileId=file_id)
 
-        drive_service.files().update(
-            fileId=file_id,
-            addParents=destination_folder_id,
-            removeParents=prev_parents,
-            fields="id, parents"
-        ).execute()
+        # Default to file_id if no name provided
+        safe_name = file_name or f"{file_id}.dat"
+        local_path = os.path.join("/tmp", safe_name)
 
-        logging.info(f"SUCCESS: File {file_id} moved.")
+        fh = io.FileIO(local_path, "wb")
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                logging.info(
+                    f"Download progress for {file_name or file_id}: {int(status.progress() * 100)}%"
+                )
+        logging.info(f"SUCCESS: File download complete: {local_path}")
+        return local_path
     except Exception as e:
-        logging.error(f"ERROR: Could not move file {file_id}: {e}")
+        logging.error(f"ERROR downloading file {file_name or file_id}: {e}")
         raise
 
 
-@retry(**RETRY_CONFIG)
-def quarantine_file(drive_service, file_id: str, source_folder_id: str, error_message: str, config: Dict, gsheets_client=None):
-    """
-    Moves a file to the quarantine folder and records its original folder in Sheets.
-    """
-    quarantine_folder_id = config['google_drive']['quarantine_folder_id']
-    logging.warning(f"Quarantining file {file_id} due to error: {error_message}")
-
-    # 1. Update description in Drive
+# -----------------------
+# Move File
+# -----------------------
+def move_file(service, file_id: str, old_folder_id: str, new_folder_id: str):
+    """Move file from one folder to another."""
     try:
-        body = {'description': f"QUARANTINE_REASON: {error_message[:1000]}"}  # Trim error message
-        drive_service.files().update(fileId=file_id, body=body).execute()
-        logging.info(f"Updated description for quarantined file {file_id}.")
-    except HttpError as e:
-        logging.error(f"Could not update description for file {file_id}: {e}")
+        file = service.files().get(fileId=file_id, fields="parents").execute()
+        prev_parents = ",".join(file.get("parents", []))
+        service.files().update(
+            fileId=file_id,
+            addParents=new_folder_id,
+            removeParents=prev_parents,
+            fields="id, parents",
+        ).execute()
+        logging.info(f"SUCCESS: File {file_id} moved to {new_folder_id}")
+    except Exception as e:
+        logging.error(f"ERROR moving file {file_id}: {e}")
+        raise
 
-    # 2. Move to quarantine
-    move_file(drive_service, file_id, source_folder_id, quarantine_folder_id)
 
-    # 3. Update ledger with original folder (for reprocessing later)
-    if gsheets_client:
-        try:
-            sheets.update_ledger(
-                gsheets_client,
-                file_id,
-                "Quarantined",
-                error_message,
-                config,
-                original_folder=source_folder_id
-            )
-        except Exception as e:
-            logging.error(f"Failed to update ledger for quarantined file {file_id}: {e}")
+# -----------------------
+# Discover Team Folders
+# -----------------------
+def discover_team_folders(service, parent_folder_id: str) -> dict:
+    """Discover city/team folders inside the parent folder."""
+    team_folders = {}
+    try:
+        city_folders = service.files().list(
+            q=f"'{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields="files(id, name)",
+        ).execute().get("files", [])
+
+        for city in city_folders:
+            logging.info(f"Found city folder: {city['name']}")
+            member_folders = service.files().list(
+                q=f"'{city['id']}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+                fields="files(id, name)",
+            ).execute().get("files", [])
+            for member in member_folders:
+                logging.info(
+                    f"  - Discovered team member folder: {member['name']} (ID: {member['id']})"
+                )
+                team_folders[member["name"]] = member["id"]
+    except Exception as e:
+        logging.error(f"ERROR discovering team folders: {e}")
+    return team_folders
+
+
+# -----------------------
+# Get Files To Process
+# -----------------------
+def get_files_to_process(service, folder_id: str, processed_file_ids: list) -> list:
+    """List all unprocessed media files in a folder."""
+    try:
+        query = f"'{folder_id}' in parents and trashed=false"
+        files = service.files().list(
+            q=query, fields="files(id, name, mimeType, createdTime)"
+        ).execute().get("files", [])
+
+        media_files = [
+            f
+            for f in files
+            if f["mimeType"].startswith("audio/")
+            or f["mimeType"].startswith("video/")
+        ]
+
+        new_files = [f for f in media_files if f["id"] not in processed_file_ids]
+        return new_files
+    except Exception as e:
+        logging.error(f"ERROR getting files to process from folder {folder_id}: {e}")
+        return []
+
+
+# -----------------------
+# Quarantine File
+# -----------------------
+def quarantine_file(service, file_id: str, current_folder_id: str, error_message: str, config: dict):
+    """Move file to quarantine folder and update description."""
+    try:
+        quarantine_id = config["google_drive"]["quarantine_folder_id"]
+
+        # Update description with error message
+        service.files().update(
+            fileId=file_id,
+            body={"description": f"Quarantined due to error: {error_message}"},
+        ).execute()
+
+        move_file(service, file_id, current_folder_id, quarantine_id)
+        logging.info(f"SUCCESS: File {file_id} quarantined.")
+    except Exception as e:
+        logging.error(f"ERROR quarantining file {file_id}: {e}")
