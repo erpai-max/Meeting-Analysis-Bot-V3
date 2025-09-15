@@ -37,16 +37,11 @@ def authenticate_google_services():
         scopes = [
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/bigquery",  # ✅ Added for BQ
         ]
         creds = service_account.Credentials.from_service_account_info(
             creds_info, scopes=scopes
         )
-
-        # Export creds so BigQuery client in analysis.py works
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp_key.json"
-        with open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"], "w") as f:
-            json.dump(creds_info, f)
 
         drive_service = build("drive", "v3", credentials=creds)
         gsheets_client = gspread.authorize(creds)
@@ -66,8 +61,8 @@ def export_data_for_dashboard(gsheets_client, config):
     try:
         all_records = sheets.get_all_results(gsheets_client, config)
         if all_records:
-            with open("dashboard_data.json", "w", encoding="utf-8") as f:
-                json.dump(all_records, f, indent=2, ensure_ascii=False)
+            with open("dashboard_data.json", "w") as f:
+                json.dump(all_records, f, indent=2)
             logging.info(
                 f"SUCCESS: Exported {len(all_records)} records to dashboard_data.json."
             )
@@ -115,7 +110,7 @@ def retry_quarantined_files(drive_service, gsheets_client, config):
                             "Moved back for retry",
                             "Auto-retry after 1 day",
                             config,
-                            file_name,
+                            file_name,   # ✅ pass file_name
                         )
                     except Exception as e:
                         logging.error(
@@ -132,8 +127,13 @@ def main():
     logging.info("--- Starting Meeting Analysis Bot v4.6 ---")
 
     # Load config
-    config_path = "config.yaml" if os.path.exists("config.yaml") else "config.yml"
-    if not os.path.exists(config_path):
+    config_path = None
+    if os.path.exists("config.yaml"):
+        config_path = "config.yaml"
+    elif os.path.exists("config.yml"):
+        config_path = "config.yml"
+
+    if not config_path:
         logging.error("CRITICAL: config.yaml/.yml not found. Exiting.")
         sys.exit(1)
 
@@ -191,9 +191,16 @@ def main():
                     except Exception as e:
                         error_message = f"Unhandled error in main loop for file {file_name}: {e}"
                         logging.error(error_message)
-                        gdrive.quarantine_file(
-                            drive_service, file_id, folder_id, str(e), config
-                        )
+
+                        # Quarantine file if something fails
+                        try:
+                            gdrive.quarantine_file(
+                                drive_service, file_id, folder_id, str(e), config
+                            )
+                        except Exception as qe:
+                            logging.error(f"Failed to quarantine {file_name}: {qe}")
+
+                        # Always log to ledger
                         sheets.update_ledger(
                             gsheets_client, file_id, "Quarantined", str(e), config, file_name
                         )
