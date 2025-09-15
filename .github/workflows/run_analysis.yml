@@ -1,14 +1,14 @@
 name: Run Meeting Analysis
 
 on:
-  workflow_dispatch:    # Allows manual runs
+  workflow_dispatch:
   schedule:
-    - cron: '0 * * * *' # Runs every hour
+    - cron: '0 * * * *'     # Hourly analysis
+    - cron: '30 2 * * MON'  # Weekly digest (8 AM IST)
 
 jobs:
-  run-python-script:
+  run-analysis:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -19,7 +19,7 @@ jobs:
           python-version: '3.10'
 
       - name: Cache pip dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -31,10 +31,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Execute analysis script
+      - name: Run meeting analysis
+        if: github.event.schedule == '0 * * * *'
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} # Optional failover
-          HF_TOKEN: ${{ secrets.HF_TOKEN }} # Optional, for diarization
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python main.py
+
+      - name: Run weekly digest
+        if: github.event.schedule == '30 2 * * MON'
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        run: python digest_generator.py
