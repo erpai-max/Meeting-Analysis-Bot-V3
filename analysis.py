@@ -3,8 +3,10 @@ import json
 import logging
 import sheets
 from google.cloud import bigquery
+from google.oauth2 import service_account
 from faster_whisper import WhisperModel
 import google.generativeai as genai
+from openai import OpenAI
 
 # -----------------------
 # Gemini Prompt Template
@@ -58,44 +60,68 @@ def transcribe_audio(file_path: str, config: dict) -> str:
         logging.error(f"ERROR during transcription: {e}")
         return ""
 
-
 # -----------------------
 # AI Analysis
 # -----------------------
 def analyze_transcript(transcript: str, config: dict) -> dict:
-    """Calls Gemini API to analyze transcript and return structured JSON."""
+    """Calls Gemini API first; falls back to OpenRouter if quota fails."""
+    raw_text = ""
     try:
+        # --- Try Gemini first ---
         genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
         model = genai.GenerativeModel(config["analysis"].get("gemini_model", "gemini-1.5-flash"))
 
         response = model.generate_content(GEMINI_PROMPT + "\n\nTranscript:\n" + transcript)
         raw_text = response.text.strip()
+        logging.info("SUCCESS: Gemini response received.")
 
-        # Ensure only JSON is returned
+    except Exception as e:
+        logging.warning(f"Gemini failed, falling back to OpenRouter: {e}")
+        try:
+            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY"))
+            resp = client.chat.completions.create(
+                model=config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"),
+                messages=[{"role": "system", "content": GEMINI_PROMPT},
+                          {"role": "user", "content": transcript}],
+                response_format={"type": "json_object"}
+            )
+            raw_text = resp.choices[0].message.content.strip()
+            logging.info("SUCCESS: OpenRouter fallback response received.")
+        except Exception as e2:
+            logging.error(f"Both Gemini and OpenRouter failed: {e2}")
+            return {}
+
+    # --- Parse JSON safely ---
+    try:
         if raw_text.startswith("```"):
             raw_text = raw_text.strip("`")
             if raw_text.lower().startswith("json"):
                 raw_text = raw_text[4:].strip()
 
-        analysis_data = json.loads(raw_text)
-        logging.info("SUCCESS: Parsed AI analysis JSON output.")
-        return analysis_data
+        return json.loads(raw_text)
     except Exception as e:
-        logging.error(f"ERROR during AI analysis: {e}")
+        logging.error(f"ERROR parsing AI JSON output: {e}")
         return {}
-
 
 # -----------------------
 # BigQuery
 # -----------------------
 def write_to_bigquery(record: dict, config: dict):
-    """Inserts a normalized record into BigQuery table."""
+    """Inserts a normalized record into BigQuery table with service account credentials."""
     try:
         project_id = config["google_bigquery"]["project_id"]
         dataset_id = config["google_bigquery"]["dataset_id"]
         table_id = config["google_bigquery"]["table_id"]
 
-        client = bigquery.Client(project=project_id)
+        # Use the same GCP_SA_KEY env var
+        gcp_key_str = os.environ.get("GCP_SA_KEY")
+        if not gcp_key_str:
+            logging.error("GCP_SA_KEY not found in environment.")
+            return
+        creds_info = json.loads(gcp_key_str)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
+
+        client = bigquery.Client(project=project_id, credentials=creds)
         table_ref = f"{project_id}.{dataset_id}.{table_id}"
 
         normalized = sheets.normalize_for_bigquery(record)
@@ -107,7 +133,6 @@ def write_to_bigquery(record: dict, config: dict):
             logging.info("SUCCESS: Row inserted into BigQuery.")
     except Exception as e:
         logging.error(f"ERROR inserting into BigQuery: {e}")
-
 
 # -----------------------
 # Main File Processor
@@ -121,7 +146,7 @@ def process_single_file(drive_service, gsheets_client, file_meta, member_name: s
 
     try:
         logging.info(f"Downloading file: {file_name}")
-        local_path = download_file(drive_service, file_id, file_name)
+        local_path = download_file(drive_service, file_id)
 
         # Step 1: Transcription
         transcript = transcribe_audio(local_path, config)
@@ -143,11 +168,11 @@ def process_single_file(drive_service, gsheets_client, file_meta, member_name: s
         write_to_bigquery(analysis_data, config)
 
         # Step 6: Log success in ledger
-        sheets.update_ledger(gsheets_client, file_id, "Processed", "", config, file_name)
+        sheets.update_ledger(gsheets_client, file_id, "Processed", "", config)
 
         logging.info(f"SUCCESS: Completed processing of {file_name}")
     except Exception as e:
         logging.error(f"ERROR processing {file_name}: {e}")
-        # Always log failure in ledger with file name
-        sheets.update_ledger(gsheets_client, file_id, "Failed", str(e), config, file_name)
+        # Always log failure in ledger
+        sheets.update_ledger(gsheets_client, file_id, "Failed", str(e), config)
         raise
