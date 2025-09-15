@@ -85,7 +85,8 @@ def normalize_for_bigquery(record: dict) -> dict:
     """
     normalized = {}
     for old_key, value in record.items():
-        new_key = HEADER_MAP.get(old_key, old_key.lower().replace(" ", "_"))
+        clean_key = old_key.strip()
+        new_key = HEADER_MAP.get(clean_key, clean_key.lower().replace(" ", "_"))
         normalized[new_key] = value
     return normalized
 
@@ -110,7 +111,7 @@ def get_processed_file_ids(gsheets_client, config) -> List[str]:
         return []
 
 
-def update_ledger(gsheets_client, file_id: str, status: str, error: str, config: Dict):
+def update_ledger(gsheets_client, file_id: str, status: str, error: str, config: Dict, file_name: str = ""):
     """Appends a new row to the ledger for tracking."""
     try:
         sheet_id = config["google_sheets"]["sheet_id"]
@@ -121,10 +122,10 @@ def update_ledger(gsheets_client, file_id: str, status: str, error: str, config:
         except Exception:
             spreadsheet = gsheets_client.open_by_key(sheet_id)
             ledger_ws = spreadsheet.add_worksheet(title=ledger_tab, rows="1000", cols="5")
-            ledger_ws.append_row(LEDGER_HEADERS)
+            ledger_ws.append_row(LEDGER_HEADERS, value_input_option="USER_ENTERED")
 
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ledger_ws.append_row([file_id, "", status, error, timestamp])
+        ledger_ws.append_row([file_id, file_name, status, error, timestamp], value_input_option="USER_ENTERED")
         logging.info(f"SUCCESS: Ledger appended new row for file {file_id}.")
     except Exception as e:
         logging.error(f"ERROR updating ledger for {file_id}: {e}")
