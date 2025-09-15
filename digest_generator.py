@@ -8,10 +8,10 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import requests
 from google.oauth2 import service_account
 from google.cloud import bigquery
 import google.generativeai as genai
+import httpx
 
 # Import email formatter (with charts)
 import email_formatter
@@ -28,25 +28,20 @@ def get_bigquery_client(config: Dict, gcp_key_str: str) -> bigquery.Client:
     """Authenticates and returns a BigQuery client."""
     try:
         creds_info = json.loads(gcp_key_str)
-        scopes = ["https://www.googleapis.com/auth/bigquery"]
-        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
         project_id = config["google_bigquery"]["project_id"]
         client = bigquery.Client(credentials=creds, project=project_id)
         logging.info(f"SUCCESS: Authenticated with Google BigQuery for project '{project_id}'.")
         return client
     except Exception as e:
         logging.error(f"CRITICAL: BigQuery client authentication failed: {e}")
-        return None  # ✅ don’t crash, return None
+        raise
 
 # =======================
 # Data Fetching
 # =======================
 def fetch_manager_data(bq_client: bigquery.Client, table_ref: str, manager_name: str) -> List[Dict]:
     """Fetches performance data for a manager's team (last 7 days + previous week)."""
-    if not bq_client:
-        logging.warning("No BigQuery client available. Skipping fetch.")
-        return []
-
     query = f"""
         WITH weekly_data AS (
             SELECT
@@ -129,14 +124,14 @@ def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List[Dict], List[
             }
         )
 
-    coaching_notes = []  # Can add advanced logic later
+    coaching_notes = []  # Placeholder for future logic
     return kpis, sorted(team_performance, key=lambda x: x["avg_score"], reverse=True), coaching_notes
 
 # =======================
-# AI Summary
+# AI Summary (Gemini + OpenRouter failover)
 # =======================
 def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], config: Dict) -> str:
-    """Uses Gemini (fallback to OpenRouter) to generate a 2–3 sentence summary."""
+    """Uses Gemini (fallback: OpenRouter) to generate a 2–3 sentence executive summary."""
     logging.info(f"Generating AI summary for {manager_name}...")
 
     prompt = f"""
@@ -155,42 +150,44 @@ def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], co
     Summary:
     """
 
-    # --- First try Gemini ---
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
-        try:
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel(config["analysis"]["gemini_model"])
-            response = model.generate_content(prompt)
-            return response.text.strip()
-        except Exception as e:
-            logging.warning(f"Gemini summary failed, falling back to OpenRouter: {e}")
-
-    # --- Fallback: OpenRouter ---
     try:
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY')}",
-            "Content-Type": "application/json",
-        }
-        model_name = config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo")
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json={
-                "model": model_name,
+        # --- Primary: Gemini ---
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        if not gemini_key:
+            raise ValueError("GEMINI_API_KEY not set")
+
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel(config["analysis"]["gemini_model"])
+        response = model.generate_content(prompt)
+        return response.text.strip()
+
+    except Exception as gemini_error:
+        logging.warning(f"Gemini summary failed ({gemini_error}), trying OpenRouter...")
+
+        try:
+            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+            if not openrouter_key:
+                raise ValueError("OPENROUTER_API_KEY not set")
+
+            headers = {
+                "Authorization": f"Bearer {openrouter_key}",
+                "HTTP-Referer": "https://github.com/your-repo",
+                "X-Title": "Meeting Analysis Bot"
+            }
+            payload = {
+                "model": config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"),
                 "messages": [
-                    {"role": "system", "content": "You are a concise sales analyst."},
-                    {"role": "user", "content": prompt},
+                    {"role": "system", "content": "You are a senior sales analyst generating executive summaries."},
+                    {"role": "user", "content": prompt}
                 ],
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logging.error(f"AI summary fallback failed: {e}")
-        return "AI summary not available."
+                "temperature": 0.3
+            }
+            r = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logging.error(f"Both Gemini and OpenRouter failed: {e}")
+            return "AI summary not available."
 
 # =======================
 # Email Sending
@@ -234,12 +231,11 @@ def main():
         return
 
     gcp_key_str = os.environ.get("GCP_SA_KEY")
-    bq_client = get_bigquery_client(config, gcp_key_str)
-
-    if not bq_client:
-        logging.warning("BigQuery unavailable. Digests will be empty.")
+    if not gcp_key_str:
+        logging.error("CRITICAL: GCP_SA_KEY not found in environment.")
         return
 
+    bq_client = get_bigquery_client(config, gcp_key_str)
     table_ref = f"{bq_client.project}.{config['google_bigquery']['dataset_id']}.{config['google_bigquery']['table_id']}"
 
     manager_emails = config.get("manager_emails", {})
