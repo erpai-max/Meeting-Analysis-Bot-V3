@@ -3,9 +3,10 @@ import json
 import logging
 import sheets
 from google.cloud import bigquery
+from google.oauth2 import service_account
 from faster_whisper import WhisperModel
 import google.generativeai as genai
-import requests
+import httpx
 
 # -----------------------
 # Gemini Prompt Template
@@ -60,72 +61,57 @@ def transcribe_audio(file_path: str, config: dict) -> str:
         return ""
 
 # -----------------------
-# AI Analysis with Failover
+# AI Analysis (Gemini + OpenRouter failover)
 # -----------------------
 def analyze_transcript(transcript: str, config: dict) -> dict:
-    """
-    Calls Gemini API first; if quota/exceeds/errors → fallback to OpenRouter.
-    Returns structured JSON dict.
-    """
-    prompt = GEMINI_PROMPT + "\n\nTranscript:\n" + transcript
-
-    # --- Try Gemini ---
+    """Calls Gemini API, falls back to OpenRouter if quota exceeded, returns structured JSON."""
     try:
+        # --- Primary: Gemini ---
         genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
         model = genai.GenerativeModel(config["analysis"].get("gemini_model", "gemini-1.5-flash"))
-        response = model.generate_content(prompt)
-
+        response = model.generate_content(GEMINI_PROMPT + "\n\nTranscript:\n" + transcript)
         raw_text = response.text.strip()
-        if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`")
-            if raw_text.lower().startswith("json"):
-                raw_text = raw_text[4:].strip()
+    except Exception as gemini_error:
+        logging.warning(f"Gemini failed ({gemini_error}), trying OpenRouter failover...")
 
-        analysis_data = json.loads(raw_text)
-        logging.info("SUCCESS: Parsed AI analysis JSON output (Gemini).")
-        return analysis_data
-    except Exception as e:
-        logging.warning(f"Gemini failed, falling back to OpenRouter: {e}")
+        try:
+            # --- Fallback: OpenRouter ---
+            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+            if not openrouter_key:
+                raise ValueError("OPENROUTER_API_KEY not set.")
 
-    # --- Fallback: OpenRouter ---
+            headers = {
+                "Authorization": f"Bearer {openrouter_key}",
+                "HTTP-Referer": "https://github.com/your-repo",
+                "X-Title": "Meeting Analysis Bot"
+            }
+            payload = {
+                "model": config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"),
+                "messages": [
+                    {"role": "system", "content": GEMINI_PROMPT},
+                    {"role": "user", "content": transcript}
+                ],
+                "temperature": 0.3
+            }
+            r = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=120)
+            r.raise_for_status()
+            raw_text = r.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logging.error(f"ERROR: Both Gemini and OpenRouter failed: {e}")
+            return {}
+
+    # --- Cleanup output ---
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.lower().startswith("json"):
+            raw_text = raw_text[4:].strip()
+
     try:
-        openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not openrouter_api_key:
-            raise ValueError("OPENROUTER_API_KEY not set in environment")
-
-        model_name = config["analysis"].get(
-            "openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"
-        )
-
-        headers = {
-            "Authorization": f"Bearer {openrouter_api_key}",
-            "HTTP-Referer": "https://your-app",
-            "X-Title": "Meeting Analysis Bot",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": GEMINI_PROMPT},
-                {"role": "user", "content": transcript},
-            ],
-        }
-
-        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        raw_text = resp.json()["choices"][0]["message"]["content"].strip()
-
-        if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`")
-            if raw_text.lower().startswith("json"):
-                raw_text = raw_text[4:].strip()
-
         analysis_data = json.loads(raw_text)
-        logging.info("SUCCESS: Parsed AI analysis JSON output (OpenRouter).")
+        logging.info("SUCCESS: Parsed AI analysis JSON output.")
         return analysis_data
     except Exception as e:
-        logging.error(f"ERROR during OpenRouter analysis: {e}")
+        logging.error(f"ERROR parsing AI output: {e}\nRaw text: {raw_text[:200]}")
         return {}
 
 # -----------------------
@@ -138,7 +124,14 @@ def write_to_bigquery(record: dict, config: dict):
         dataset_id = config["google_bigquery"]["dataset_id"]
         table_id = config["google_bigquery"]["table_id"]
 
-        client = bigquery.Client(project=project_id)
+        gcp_key_str = os.environ.get("GCP_SA_KEY")
+        if not gcp_key_str:
+            raise ValueError("GCP_SA_KEY not set in environment.")
+
+        creds_info = json.loads(gcp_key_str)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
+
+        client = bigquery.Client(credentials=creds, project=project_id)
         table_ref = f"{project_id}.{dataset_id}.{table_id}"
 
         normalized = sheets.normalize_for_bigquery(record)
