@@ -6,6 +6,7 @@ google-auth>=2.22.0
 google-auth-oauthlib>=1.1.0
 gspread>=5.7.2
 google-cloud-bigquery>=3.11.4
+protobuf>=4.25.1
 
 # -------------------
 # AI & Transcription
