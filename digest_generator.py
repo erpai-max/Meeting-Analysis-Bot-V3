@@ -8,6 +8,7 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import requests
 from google.oauth2 import service_account
 from google.cloud import bigquery
 import google.generativeai as genai
@@ -27,26 +28,31 @@ def get_bigquery_client(config: Dict, gcp_key_str: str) -> bigquery.Client:
     """Authenticates and returns a BigQuery client."""
     try:
         creds_info = json.loads(gcp_key_str)
-        creds = service_account.Credentials.from_service_account_info(creds_info)
+        scopes = ["https://www.googleapis.com/auth/bigquery"]
+        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
         project_id = config["google_bigquery"]["project_id"]
         client = bigquery.Client(credentials=creds, project=project_id)
         logging.info(f"SUCCESS: Authenticated with Google BigQuery for project '{project_id}'.")
         return client
     except Exception as e:
         logging.error(f"CRITICAL: BigQuery client authentication failed: {e}")
-        raise
+        return None  # ✅ don’t crash, return None
 
 # =======================
 # Data Fetching
 # =======================
 def fetch_manager_data(bq_client: bigquery.Client, table_ref: str, manager_name: str) -> List[Dict]:
     """Fetches performance data for a manager's team (last 7 days + previous week)."""
+    if not bq_client:
+        logging.warning("No BigQuery client available. Skipping fetch.")
+        return []
+
     query = f"""
         WITH weekly_data AS (
             SELECT
                 Owner, Team,
-                SAFE_CAST(NULLIF(TRIM(Percent_Score), '') AS NUMERIC) AS Percent_Score,
-                SAFE_CAST(NULLIF(TRIM(Amount_Value), '') AS NUMERIC) AS Amount_Value,
+                SAFE_CAST(NULLIF(TRIM(percent_score), '') AS NUMERIC) AS Percent_Score,
+                SAFE_CAST(NULLIF(TRIM(amount_value), '') AS NUMERIC) AS Amount_Value,
                 SAFE.PARSE_DATETIME('%Y/%m/%d', Date) AS meeting_date
             FROM `{table_ref}`
             WHERE Manager = '{manager_name}'
@@ -130,15 +136,8 @@ def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List[Dict], List[
 # AI Summary
 # =======================
 def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], config: Dict) -> str:
-    """Uses Gemini to generate a 2–3 sentence executive summary."""
+    """Uses Gemini (fallback to OpenRouter) to generate a 2–3 sentence summary."""
     logging.info(f"Generating AI summary for {manager_name}...")
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if not gemini_key:
-        logging.error("GEMINI_API_KEY not set. Cannot generate AI summary.")
-        return "AI summary could not be generated."
-
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel(config["analysis"]["gemini_model"])
 
     prompt = f"""
     You are a senior sales analyst providing a weekly summary to {manager_name}.
@@ -155,11 +154,42 @@ def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], co
 
     Summary:
     """
+
+    # --- First try Gemini ---
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        try:
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel(config["analysis"]["gemini_model"])
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            logging.warning(f"Gemini summary failed, falling back to OpenRouter: {e}")
+
+    # --- Fallback: OpenRouter ---
     try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY')}",
+            "Content-Type": "application/json",
+        }
+        model_name = config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo")
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "You are a concise sales analyst."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        logging.error(f"AI summary failed: {e}")
+        logging.error(f"AI summary fallback failed: {e}")
         return "AI summary not available."
 
 # =======================
@@ -205,6 +235,10 @@ def main():
 
     gcp_key_str = os.environ.get("GCP_SA_KEY")
     bq_client = get_bigquery_client(config, gcp_key_str)
+
+    if not bq_client:
+        logging.warning("BigQuery unavailable. Digests will be empty.")
+        return
 
     table_ref = f"{bq_client.project}.{config['google_bigquery']['dataset_id']}.{config['google_bigquery']['table_id']}"
 
