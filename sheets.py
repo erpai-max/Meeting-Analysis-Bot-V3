@@ -95,9 +95,8 @@ def get_processed_file_ids(gsheets_client, config) -> List[str]:
     """Reads the ledger sheet and returns all previously processed file IDs."""
     try:
         sheet_id = config["google_sheets"]["sheet_id"]
-        ledger_ws = gsheets_client.open_by_key(sheet_id).worksheet(
-            config["google_sheets"].get("ledger_tab_name", "Ledger")
-        )
+        ledger_tab = config["google_sheets"].get("ledger_tab_name", "Processed Ledger")
+        ledger_ws = gsheets_client.open_by_key(sheet_id).worksheet(ledger_tab)
 
         records = ledger_ws.get_all_records()
         file_ids = [r["File ID"] for r in records if "File ID" in r and r["File ID"]]
@@ -112,7 +111,7 @@ def update_ledger(gsheets_client, file_id: str, status: str, error: str, config:
     """Appends a new row to the ledger for tracking."""
     try:
         sheet_id = config["google_sheets"]["sheet_id"]
-        ledger_tab = config["google_sheets"].get("ledger_tab_name", "Ledger")
+        ledger_tab = config["google_sheets"].get("ledger_tab_name", "Processed Ledger")
 
         try:
             ledger_ws = gsheets_client.open_by_key(sheet_id).worksheet(ledger_tab)
@@ -123,7 +122,7 @@ def update_ledger(gsheets_client, file_id: str, status: str, error: str, config:
 
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ledger_ws.append_row([file_id, file_name or "Unknown", status, error, timestamp])
-        logging.info(f"SUCCESS: Ledger appended new row for file {file_id} ({file_name}).")
+        logging.info(f"SUCCESS: Ledger updated for file {file_id} ({file_name}). Status={status}")
     except Exception as e:
         logging.error(f"ERROR updating ledger for {file_id}: {e}")
 
@@ -135,7 +134,7 @@ def write_analysis_result(gsheets_client, analysis_data: Dict[str, str], config:
     """Appends structured analysis results to the main Google Sheet."""
     try:
         sheet_id = config["google_sheets"]["sheet_id"]
-        results_tab = config["google_sheets"].get("results_tab_name", "Results")
+        results_tab = config["google_sheets"].get("results_tab_name", "Analysis Results")
         ws = gsheets_client.open_by_key(sheet_id).worksheet(results_tab)
 
         headers = ws.row_values(1)
@@ -143,7 +142,15 @@ def write_analysis_result(gsheets_client, analysis_data: Dict[str, str], config:
             ws.append_row(DEFAULT_HEADERS, value_input_option="USER_ENTERED")
             headers = DEFAULT_HEADERS
 
-        row = [analysis_data.get(h, "") for h in headers]
+        # Auto-fix headers if mismatch
+        if headers != DEFAULT_HEADERS:
+            missing = [h for h in DEFAULT_HEADERS if h not in headers]
+            if missing:
+                logging.warning(f"Results sheet missing headers: {missing}. Updating header row...")
+                ws.update([DEFAULT_HEADERS], "A1")
+                headers = DEFAULT_HEADERS
+
+        row = [analysis_data.get(h, "") for h in DEFAULT_HEADERS]
         ws.append_row(row, value_input_option="USER_ENTERED")
         logging.info(
             f"SUCCESS: Wrote analysis result for '{analysis_data.get('Society Name', 'Unknown')}'"
@@ -156,7 +163,7 @@ def get_all_results(gsheets_client, config: Dict) -> List[Dict]:
     """Fetches all rows from the Results sheet for dashboard export."""
     try:
         sheet_id = config["google_sheets"]["sheet_id"]
-        results_tab = config["google_sheets"].get("results_tab_name", "Results")
+        results_tab = config["google_sheets"].get("results_tab_name", "Analysis Results")
         ws = gsheets_client.open_by_key(sheet_id).worksheet(results_tab)
         records = ws.get_all_records()
         logging.info(f"Exported {len(records)} rows from Results sheet.")
