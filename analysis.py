@@ -1,5 +1,4 @@
 import os
-import re
 import json
 import logging
 import sheets
@@ -50,14 +49,15 @@ def transcribe_audio(file_path: str, config: dict) -> str:
     """Transcribes audio using Faster-Whisper."""
     model_size = config["analysis"].get("whisper_model", "tiny.en")
     try:
-        model = WhisperModel(model_size, device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(file_path, beam_size=5)
+        model = WhisperModel(model_size)
+        segments, _ = model.transcribe(file_path)
         transcript = " ".join([s.text for s in segments])
         logging.info(f"SUCCESS: Transcribed {len(transcript.split())} words.")
         return transcript
     except Exception as e:
         logging.error(f"ERROR during transcription: {e}")
         return ""
+
 
 # -----------------------
 # AI Analysis
@@ -66,20 +66,16 @@ def analyze_transcript(transcript: str, config: dict) -> dict:
     """Calls Gemini API to analyze transcript and return structured JSON."""
     try:
         genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-        model = genai.GenerativeModel(
-            config["analysis"].get("gemini_model", "gemini-1.5-flash")
-        )
+        model = genai.GenerativeModel(config["analysis"].get("gemini_model", "gemini-1.5-flash"))
 
-        response = model.generate_content(
-            GEMINI_PROMPT + "\n\nTranscript:\n" + transcript,
-            generation_config={"response_mime_type": "application/json"}
-        )
-
+        response = model.generate_content(GEMINI_PROMPT + "\n\nTranscript:\n" + transcript)
         raw_text = response.text.strip()
 
-        # Clean code fences if present
-        raw_text = re.sub(r"^```(json)?", "", raw_text, flags=re.IGNORECASE).strip()
-        raw_text = re.sub(r"```$", "", raw_text).strip()
+        # Ensure only JSON is returned
+        if raw_text.startswith("```"):
+            raw_text = raw_text.strip("`")
+            if raw_text.lower().startswith("json"):
+                raw_text = raw_text[4:].strip()
 
         analysis_data = json.loads(raw_text)
         logging.info("SUCCESS: Parsed AI analysis JSON output.")
@@ -87,6 +83,7 @@ def analyze_transcript(transcript: str, config: dict) -> dict:
     except Exception as e:
         logging.error(f"ERROR during AI analysis: {e}")
         return {}
+
 
 # -----------------------
 # BigQuery
@@ -101,7 +98,6 @@ def write_to_bigquery(record: dict, config: dict):
         client = bigquery.Client(project=project_id)
         table_ref = f"{project_id}.{dataset_id}.{table_id}"
 
-        # Ensure keys are BigQuery-safe
         normalized = sheets.normalize_for_bigquery(record)
         errors = client.insert_rows_json(table_ref, [normalized])
 
@@ -111,6 +107,7 @@ def write_to_bigquery(record: dict, config: dict):
             logging.info("SUCCESS: Row inserted into BigQuery.")
     except Exception as e:
         logging.error(f"ERROR inserting into BigQuery: {e}")
+
 
 # -----------------------
 # Main File Processor
@@ -145,15 +142,12 @@ def process_single_file(drive_service, gsheets_client, file_meta, member_name: s
         # Step 5: Write to BigQuery
         write_to_bigquery(analysis_data, config)
 
+        # Step 6: Log success in ledger
+        sheets.update_ledger(gsheets_client, file_id, "Processed", "", config, file_name)
+
         logging.info(f"SUCCESS: Completed processing of {file_name}")
     except Exception as e:
         logging.error(f"ERROR processing {file_name}: {e}")
+        # Always log failure in ledger with file name
+        sheets.update_ledger(gsheets_client, file_id, "Failed", str(e), config, file_name)
         raise
-    finally:
-        # Cleanup local file to avoid disk bloat
-        try:
-            if os.path.exists(local_path):
-                os.remove(local_path)
-                logging.info(f"Cleaned up local file: {local_path}")
-        except Exception as cleanup_err:
-            logging.warning(f"Could not delete temp file {local_path}: {cleanup_err}")
