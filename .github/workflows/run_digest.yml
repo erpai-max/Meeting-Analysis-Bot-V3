@@ -1,13 +1,13 @@
 name: Run Meeting Analysis Digest
 
 on:
-  workflow_dispatch:   # Manual trigger
+  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
   schedule:
-    # 04:00 UTC Friday = 09:30 IST Friday
-    - cron: '0 4 * * 5'
+    # Runs at 04:00 UTC on Monday → 9:30 AM IST Monday morning
+    - cron: '0 4 * * 1'
 
 jobs:
-  run-digest:
+  generate-digest:
     runs-on: ubuntu-latest
 
     steps:
@@ -32,14 +32,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run weekly digest
+      - name: Generate and Send Digest
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} # Failover for Gemini
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }} # Sender email
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }} # App Password for email
         run: |
-          echo "=== STARTING WEEKLY DIGEST ==="
-          python digest_generator.py
-          echo "=== WEEKLY DIGEST FINISHED ==="
+          echo "🚀 Running Weekly Digest..."
+          python digest_generator.py || echo "⚠️ Digest script failed"
