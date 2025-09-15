@@ -3,7 +3,6 @@ import json
 import logging
 import sheets
 from google.cloud import bigquery
-from google.oauth2 import service_account
 from faster_whisper import WhisperModel
 import google.generativeai as genai
 import httpx
@@ -36,7 +35,7 @@ ASP (₹22.5 + 18% GST per flat / month):
 1. Parse the transcript.  
 2. Fill in all fields in the schema below.  
 3. If data is not explicitly available, leave as `""`.  
-4. For multiple points, use **bulleted string format**:
+4. For multiple points, use **bulleted string format**.
 
 ### OUTPUT RULES
 - Output must be **valid JSON only** (no explanations, no markdown).  
@@ -61,46 +60,45 @@ def transcribe_audio(file_path: str, config: dict) -> str:
         return ""
 
 # -----------------------
-# AI Analysis (Gemini + OpenRouter failover)
+# AI Analysis with Failover
 # -----------------------
 def analyze_transcript(transcript: str, config: dict) -> dict:
-    """Calls Gemini API, falls back to OpenRouter if quota exceeded, returns structured JSON."""
+    """Analyze transcript using Gemini API, fallback to OpenRouter if quota exceeded."""
     try:
-        # --- Primary: Gemini ---
         genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
         model = genai.GenerativeModel(config["analysis"].get("gemini_model", "gemini-1.5-flash"))
         response = model.generate_content(GEMINI_PROMPT + "\n\nTranscript:\n" + transcript)
         raw_text = response.text.strip()
-    except Exception as gemini_error:
-        logging.warning(f"Gemini failed ({gemini_error}), trying OpenRouter failover...")
-
+    except Exception as e:
+        logging.warning(f"Gemini failed: {e}. Trying OpenRouter fallback...")
         try:
-            # --- Fallback: OpenRouter ---
             openrouter_key = os.environ.get("OPENROUTER_API_KEY")
             if not openrouter_key:
-                raise ValueError("OPENROUTER_API_KEY not set.")
+                raise RuntimeError("No OpenRouter API key set")
 
             headers = {
                 "Authorization": f"Bearer {openrouter_key}",
-                "HTTP-Referer": "https://github.com/your-repo",
-                "X-Title": "Meeting Analysis Bot"
+                "Content-Type": "application/json",
             }
             payload = {
-                "model": config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"),
+                "model": config["analysis"].get(
+                    "openrouter_model_name",
+                    "nousresearch/nous-hermes-2-mistral-7b-dpo"
+                ),
                 "messages": [
                     {"role": "system", "content": GEMINI_PROMPT},
-                    {"role": "user", "content": transcript}
+                    {"role": "user", "content": transcript},
                 ],
-                "temperature": 0.3
             }
-            r = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=120)
-            r.raise_for_status()
-            raw_text = r.json()["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            logging.error(f"ERROR: Both Gemini and OpenRouter failed: {e}")
+            resp = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
+            resp.raise_for_status()
+            raw_text = resp.json()["choices"][0]["message"]["content"]
+        except Exception as e2:
+            logging.error(f"Fallback also failed: {e2}")
             return {}
 
-    # --- Cleanup output ---
+    # Ensure only JSON is returned
+    raw_text = raw_text.strip()
     if raw_text.startswith("```"):
         raw_text = raw_text.strip("`")
         if raw_text.lower().startswith("json"):
@@ -111,27 +109,20 @@ def analyze_transcript(transcript: str, config: dict) -> dict:
         logging.info("SUCCESS: Parsed AI analysis JSON output.")
         return analysis_data
     except Exception as e:
-        logging.error(f"ERROR parsing AI output: {e}\nRaw text: {raw_text[:200]}")
+        logging.error(f"ERROR parsing AI output: {e}")
         return {}
 
 # -----------------------
-# BigQuery
+# BigQuery (Safe for Free Tier)
 # -----------------------
 def write_to_bigquery(record: dict, config: dict):
-    """Inserts a normalized record into BigQuery table."""
+    """Inserts a normalized record into BigQuery table (skips if free-tier blocks streaming)."""
     try:
         project_id = config["google_bigquery"]["project_id"]
         dataset_id = config["google_bigquery"]["dataset_id"]
         table_id = config["google_bigquery"]["table_id"]
 
-        gcp_key_str = os.environ.get("GCP_SA_KEY")
-        if not gcp_key_str:
-            raise ValueError("GCP_SA_KEY not set in environment.")
-
-        creds_info = json.loads(gcp_key_str)
-        creds = service_account.Credentials.from_service_account_info(creds_info)
-
-        client = bigquery.Client(credentials=creds, project=project_id)
+        client = bigquery.Client(project=project_id)
         table_ref = f"{project_id}.{dataset_id}.{table_id}"
 
         normalized = sheets.normalize_for_bigquery(record)
@@ -142,7 +133,10 @@ def write_to_bigquery(record: dict, config: dict):
         else:
             logging.info("SUCCESS: Row inserted into BigQuery.")
     except Exception as e:
-        logging.error(f"ERROR inserting into BigQuery: {e}")
+        if "Streaming insert is not allowed" in str(e):
+            logging.warning("⚠️ BigQuery streaming insert blocked (free tier). Skipping insert.")
+        else:
+            logging.error(f"ERROR inserting into BigQuery: {e}")
 
 # -----------------------
 # Main File Processor
@@ -174,7 +168,7 @@ def process_single_file(drive_service, gsheets_client, file_meta, member_name: s
         # Step 4: Write to Google Sheets
         sheets.write_analysis_result(gsheets_client, analysis_data, config)
 
-        # Step 5: Write to BigQuery
+        # Step 5: Write to BigQuery (skipped if free tier blocks)
         write_to_bigquery(analysis_data, config)
 
         # Step 6: Log success in ledger
