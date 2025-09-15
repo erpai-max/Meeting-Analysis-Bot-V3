@@ -1,12 +1,12 @@
 name: Run Meeting Analysis
 
 on:
-  workflow_dispatch:    # Manual runs
+  workflow_dispatch:    # Allows manual runs
   schedule:
-    - cron: '0 * * * *' # Every hour
+    - cron: '0 * * * *' # Runs every hour
 
 jobs:
-  run-analysis:
+  run-python-script:
     runs-on: ubuntu-latest
 
     steps:
@@ -31,13 +31,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run meeting analysis
+      - name: Execute analysis script
         env:
+          # 🔑 Google Service Account JSON (base64 encoded in repo secrets)
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
+          # 🔑 AI keys (Gemini first, OpenRouter as fallback)
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+          # 🔑 HuggingFace token (only needed if diarization is enabled)
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          echo "=== STARTING MEETING ANALYSIS ==="
-          python main.py
-          echo "=== MEETING ANALYSIS FINISHED ==="
+
+        run: python main.py
