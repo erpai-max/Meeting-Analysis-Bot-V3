@@ -11,21 +11,17 @@ from email.mime.text import MIMEText
 from google.oauth2 import service_account
 from google.cloud import bigquery
 import google.generativeai as genai
-import httpx
 
-# Import email formatter (with charts)
+import sheets
 import email_formatter
 
-# =======================
-# Logging
-# =======================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# =======================
-# Authentication
-# =======================
-def get_bigquery_client(config: Dict, gcp_key_str: str) -> bigquery.Client:
-    """Authenticates and returns a BigQuery client."""
+# -----------------------
+# BigQuery Authentication
+# -----------------------
+def get_bigquery_client(config: Dict, gcp_key_str: str):
+    """Authenticates BigQuery client. Returns None if not usable (free tier)."""
     try:
         creds_info = json.loads(gcp_key_str)
         creds = service_account.Credentials.from_service_account_info(creds_info)
@@ -34,23 +30,22 @@ def get_bigquery_client(config: Dict, gcp_key_str: str) -> bigquery.Client:
         logging.info(f"SUCCESS: Authenticated with Google BigQuery for project '{project_id}'.")
         return client
     except Exception as e:
-        logging.error(f"CRITICAL: BigQuery client authentication failed: {e}")
-        raise
+        logging.warning(f"⚠️ BigQuery not available: {e}")
+        return None
 
-# =======================
-# Data Fetching
-# =======================
-def fetch_manager_data(bq_client: bigquery.Client, table_ref: str, manager_name: str) -> List[Dict]:
-    """Fetches performance data for a manager's team (last 7 days + previous week)."""
+# -----------------------
+# BigQuery Fetch
+# -----------------------
+def fetch_manager_data_bigquery(bq_client, table_ref: str, manager_name: str) -> List[Dict]:
     query = f"""
         WITH weekly_data AS (
             SELECT
                 Owner, Team,
                 SAFE_CAST(NULLIF(TRIM(percent_score), '') AS NUMERIC) AS Percent_Score,
                 SAFE_CAST(NULLIF(TRIM(amount_value), '') AS NUMERIC) AS Amount_Value,
-                SAFE.PARSE_DATETIME('%Y/%m/%d', Date) AS meeting_date
+                SAFE.PARSE_DATETIME('%Y/%m/%d', date) AS meeting_date
             FROM `{table_ref}`
-            WHERE Manager = '{manager_name}'
+            WHERE manager = '{manager_name}'
         ),
         current_week AS (
             SELECT * FROM weekly_data
@@ -74,24 +69,34 @@ def fetch_manager_data(bq_client: bigquery.Client, table_ref: str, manager_name:
     """
     try:
         query_job = bq_client.query(query)
-        results = [dict(row) for row in query_job.result()]
-        logging.info(f"Found {len(results)} records for {manager_name}.")
-        return results
+        return [dict(row) for row in query_job.result()]
     except Exception as e:
-        logging.error(f"Could not fetch data for manager {manager_name}: {e}")
+        logging.warning(f"⚠️ BigQuery query failed for {manager_name}: {e}")
         return []
 
-# =======================
+# -----------------------
+# Sheets Fallback
+# -----------------------
+def fetch_manager_data_sheets(gsheets_client, config: Dict, manager_name: str) -> List[Dict]:
+    """Fallback: Read data from Google Sheets instead of BigQuery."""
+    try:
+        records = sheets.get_all_results(gsheets_client, config)
+        filtered = [r for r in records if str(r.get("Manager", "")).lower() == manager_name.lower()]
+        logging.info(f"Fetched {len(filtered)} records for {manager_name} from Google Sheets.")
+        return filtered
+    except Exception as e:
+        logging.error(f"Sheets fallback failed for {manager_name}: {e}")
+        return []
+
+# -----------------------
 # Data Processing
-# =======================
+# -----------------------
 def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List[Dict], List[Dict]]:
-    """Aggregates raw data into KPIs, team performance list, and coaching notes."""
     total_meetings = len(team_records)
-    total_pipeline = sum(r["Amount_Value"] for r in team_records if r.get("Amount_Value"))
+    total_pipeline = sum(float(r.get("Amount Value") or r.get("Amount_Value") or 0) for r in team_records)
     avg_score = (
-        sum(r["Percent_Score"] for r in team_records if r.get("Percent_Score")) / total_meetings
-        if total_meetings > 0
-        else 0
+        sum(float(r.get("Percent_Score") or r.get("% Score") or 0) for r in team_records) / total_meetings
+        if total_meetings > 0 else 0
     )
 
     kpis = {
@@ -101,106 +106,57 @@ def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List[Dict], List[
     }
 
     team_performance = []
-    reps = sorted(set(r["Owner"] for r in team_records))
+    reps = sorted(set(r.get("Owner") or r.get("Owner (Who handled the meeting)") for r in team_records))
     for rep in reps:
-        rep_meetings = [r for r in team_records if r["Owner"] == rep]
+        rep_meetings = [r for r in team_records if (r.get("Owner") or r.get("Owner (Who handled the meeting)")) == rep]
         rep_avg_score = (
-            sum(r["Percent_Score"] for r in rep_meetings if r.get("Percent_Score")) / len(rep_meetings)
-            if rep_meetings
-            else 0
+            sum(float(r.get("Percent_Score") or r.get("% Score") or 0) for r in rep_meetings) / len(rep_meetings)
+            if rep_meetings else 0
         )
-        rep_pipeline = sum(r["Amount_Value"] for r in rep_meetings if r.get("Amount_Value"))
-        prev_scores = [r["prev_week_avg_score"] for r in rep_meetings if r.get("prev_week_avg_score")]
-        avg_prev_score = sum(prev_scores) / len(prev_scores) if prev_scores else rep_avg_score
-        score_change = rep_avg_score - avg_prev_score
+        rep_pipeline = sum(float(r.get("Amount Value") or r.get("Amount_Value") or 0) for r in rep_meetings)
+        score_change = 0  # Simplified for Sheets fallback
 
-        team_performance.append(
-            {
-                "owner": rep,
-                "meetings": len(rep_meetings),
-                "avg_score": rep_avg_score,
-                "pipeline": rep_pipeline,
-                "score_change": score_change,
-            }
-        )
+        team_performance.append({
+            "owner": rep,
+            "meetings": len(rep_meetings),
+            "avg_score": rep_avg_score,
+            "pipeline": rep_pipeline,
+            "score_change": score_change,
+        })
 
-    coaching_notes = []  # Placeholder for future logic
+    coaching_notes = []  # optional
     return kpis, sorted(team_performance, key=lambda x: x["avg_score"], reverse=True), coaching_notes
 
-# =======================
-# AI Summary (Gemini + OpenRouter failover)
-# =======================
+# -----------------------
+# AI Summary
+# -----------------------
 def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], config: Dict) -> str:
-    """Uses Gemini (fallback: OpenRouter) to generate a 2–3 sentence executive summary."""
     logging.info(f"Generating AI summary for {manager_name}...")
-
-    prompt = f"""
-    You are a senior sales analyst providing a weekly summary to {manager_name}.
-    Based on the following data for their team's performance over the last 7 days, write a concise, 2–3 sentence executive summary.
-    Focus on the most important trend, biggest success, or critical area for improvement.
-
-    KPIs:
-    - Total Meetings: {kpis['total_meetings']}
-    - Team Avg Score: {kpis['avg_score']:.1f}%
-    - Pipeline Value: {email_formatter.format_currency(kpis['total_pipeline'])}
-
-    Team Performance:
-    {json.dumps(team_data, indent=2)}
-
-    Summary:
-    """
-
     try:
-        # --- Primary: Gemini ---
-        gemini_key = os.environ.get("GEMINI_API_KEY")
-        if not gemini_key:
-            raise ValueError("GEMINI_API_KEY not set")
-
-        genai.configure(api_key=gemini_key)
+        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
         model = genai.GenerativeModel(config["analysis"]["gemini_model"])
+        prompt = f"""
+        Provide a 2–3 sentence executive summary for {manager_name}'s team:
+        - Total Meetings: {kpis['total_meetings']}
+        - Team Avg Score: {kpis['avg_score']:.1f}%
+        - Pipeline Value: {email_formatter.format_currency(kpis['total_pipeline'])}
+        """
         response = model.generate_content(prompt)
         return response.text.strip()
+    except Exception as e:
+        logging.warning(f"AI summary failed: {e}")
+        return "AI summary not available."
 
-    except Exception as gemini_error:
-        logging.warning(f"Gemini summary failed ({gemini_error}), trying OpenRouter...")
-
-        try:
-            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-            if not openrouter_key:
-                raise ValueError("OPENROUTER_API_KEY not set")
-
-            headers = {
-                "Authorization": f"Bearer {openrouter_key}",
-                "HTTP-Referer": "https://github.com/your-repo",
-                "X-Title": "Meeting Analysis Bot"
-            }
-            payload = {
-                "model": config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"),
-                "messages": [
-                    {"role": "system", "content": "You are a senior sales analyst generating executive summaries."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.3
-            }
-            r = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            logging.error(f"Both Gemini and OpenRouter failed: {e}")
-            return "AI summary not available."
-
-# =======================
+# -----------------------
 # Email Sending
-# =======================
+# -----------------------
 def send_email(subject: str, html_content: str, recipient: str):
-    """Sends the digest email."""
     sender = os.environ.get("MAIL_USERNAME")
     password = os.environ.get("MAIL_PASSWORD")
 
     if not sender or not password:
-        logging.warning("MAIL_USERNAME or MAIL_PASSWORD not set. Skipping email send.")
-        print("\n--- EMAIL CONTENT PREVIEW ---\n")
-        print(f"TO: {recipient}\nSUBJECT: {subject}\n{html_content[:500]}...\n")
+        logging.warning("MAIL_USERNAME or MAIL_PASSWORD not set. Preview only.")
+        print("\n--- EMAIL PREVIEW ---\n", html_content[:500])
         return
 
     msg = MIMEMultipart("alternative")
@@ -210,42 +166,41 @@ def send_email(subject: str, html_content: str, recipient: str):
     msg.attach(MIMEText(html_content, "html"))
 
     try:
+        import smtplib
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
             server.sendmail(sender, recipient, msg.as_string())
         logging.info(f"SUCCESS: Email sent to {recipient}")
     except Exception as e:
-        logging.error(f"ERROR: Failed to send email: {e}")
+        logging.error(f"ERROR sending email: {e}")
 
-# =======================
+# -----------------------
 # Main
-# =======================
+# -----------------------
 def main():
     logging.info("--- Starting Weekly Digest Generator ---")
-
     with open("config.yaml", "r") as f:
         config = yaml.safe_load(f)
 
     if not config.get("weekly_digest", {}).get("enabled", False):
-        logging.info("Weekly digest disabled in config.yaml. Exiting.")
+        logging.info("Digest disabled. Exiting.")
         return
 
     gcp_key_str = os.environ.get("GCP_SA_KEY")
-    if not gcp_key_str:
-        logging.error("CRITICAL: GCP_SA_KEY not found in environment.")
-        return
-
     bq_client = get_bigquery_client(config, gcp_key_str)
-    table_ref = f"{bq_client.project}.{config['google_bigquery']['dataset_id']}.{config['google_bigquery']['table_id']}"
+    table_ref = f"{config['google_bigquery']['project_id']}.{config['google_bigquery']['dataset_id']}.{config['google_bigquery']['table_id']}"
 
-    manager_emails = config.get("manager_emails", {})
-    if not manager_emails:
-        logging.warning("No managers defined. Exiting.")
-        return
+    # Sheets auth (for fallback)
+    from main import authenticate_google_services
+    _, gsheets_client = authenticate_google_services()
 
-    for manager, email in manager_emails.items():
+    for manager, email in config.get("manager_emails", {}).items():
         logging.info(f"--- Generating digest for {manager} ---")
-        team_records = fetch_manager_data(bq_client, table_ref, manager)
+
+        if bq_client:
+            team_records = fetch_manager_data_bigquery(bq_client, table_ref, manager)
+        else:
+            team_records = fetch_manager_data_sheets(gsheets_client, config, manager)
 
         if not team_records:
             logging.info(f"No data for {manager} this week.")
@@ -253,16 +208,12 @@ def main():
 
         kpis, team_data, coaching_notes = process_team_data(team_records)
         ai_summary = generate_ai_summary(manager, kpis, team_data, config)
-
-        html_email = email_formatter.create_manager_digest_email(
-            manager, kpis, team_data, coaching_notes, ai_summary
-        )
+        html_email = email_formatter.create_manager_digest_email(manager, kpis, team_data, coaching_notes, ai_summary)
 
         subject = f"Weekly Meeting Digest | {manager} | {time.strftime('%b %d, %Y')}"
         send_email(subject, html_email, email)
 
     logging.info("--- Weekly Digest Generator Finished ---")
-
 
 if __name__ == "__main__":
     main()
