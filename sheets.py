@@ -1,123 +1,127 @@
 import logging
-from typing import Dict, List
-import datetime
-import json
 import gspread
+from typing import Dict, List
+from google.oauth2 import service_account
+import os
+import json
 
-# -----------------------
-# Default Headers (for backward compatibility)
-# -----------------------
-DEFAULT_HEADERS = []  # Will be filled dynamically from config
+# =======================
+# Default Headers (47 cols)
+# =======================
+DEFAULT_HEADERS = [
+    "Date",
+    "POC Name",
+    "Society Name",
+    "Visit Type",
+    "Meeting Type",
+    "Amount Value",
+    "Months",
+    "Deal Status",
+    "Vendor Leads",
+    "Society Leads",
+    "Opening Pitch Score",
+    "Product Pitch Score",
+    "Cross-Sell / Opportunity Handling",
+    "Closing Effectiveness",
+    "Negotiation Strength",
+    "Rebuttal Handling",
+    "Overall Sentiment",
+    "Total Score",
+    "% Score",
+    "Risks / Unresolved Issues",
+    "Improvements Needed",
+    "Owner (Who handled the meeting)",
+    "Email Id",
+    "Kibana ID",
+    "Manager",
+    "Product Pitch",
+    "Team",
+    "Media Link",
+    "Doc Link",
+    "Suggestions & Missed Topics",
+    "Pre-meeting brief",
+    "Meeting duration (min)",
+    "Rapport Building",
+    "Improvement Areas",
+    "Product Knowledge Displayed",
+    "Call Effectiveness and Control",
+    "Next Step Clarity and Commitment",
+    "Missed Opportunities",
+    "Key Discussion Points",
+    "Key Questions",
+    "Competition Discussion",
+    "Action items",
+    "Positive Factors",
+    "Negative Factors",
+    "Customer Needs",
+    "Overall Client Sentiment",
+    "Feature Checklist Coverage",
+    "Manager Email"
+]
 
-
-# -----------------------
-# Ledger Headers
-# -----------------------
-LEDGER_HEADERS = ["File ID", "File Name", "Status", "Error", "Timestamp"]
-
-
-# -----------------------
-# Ledger Functions
-# -----------------------
-def get_processed_file_ids(gsheets_client, config) -> List[str]:
-    """Reads the ledger sheet and returns all previously processed file IDs."""
+# =======================
+# Authenticate Sheets
+# =======================
+def authenticate_google_sheets(config: Dict):
+    """Authenticate with Google Sheets API."""
     try:
-        sheet_id = config["google_sheets"]["sheet_id"]
-        ledger_tab = config["google_sheets"].get("ledger_tab_name", "Processed Ledger")
-        ledger_ws = gsheets_client.open_by_key(sheet_id).worksheet(ledger_tab)
+        gcp_key_str = os.environ.get("GCP_SA_KEY")
+        if not gcp_key_str:
+            raise ValueError("Missing GCP_SA_KEY environment variable")
 
-        records = ledger_ws.get_all_records()
-        file_ids = [r.get("File ID") for r in records if r.get("File ID")]
-        logging.info(f"Found {len(file_ids)} file IDs in the ledger.")
-        return file_ids
+        creds_info = json.loads(gcp_key_str)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(config["google_sheets"]["sheet_id"])
+        return sheet
     except Exception as e:
-        logging.warning(f"Ledger not found or unreadable, returning empty list: {e}")
-        return []
+        logging.error(f"CRITICAL: Could not authenticate with Google Sheets: {e}")
+        raise
 
-
-def update_ledger(gsheets_client, file_id: str, status: str, error: str, config: Dict, file_name: str = "Unknown"):
-    """Appends a new row to the ledger for tracking."""
+# =======================
+# Write Analysis Results
+# =======================
+def write_analysis_result(gsheets_client, analysis_data: Dict, config: Dict):
+    """Append a normalized analysis row into the Results sheet."""
     try:
-        sheet_id = config["google_sheets"]["sheet_id"]
-        ledger_tab = config["google_sheets"].get("ledger_tab_name", "Processed Ledger")
+        ws = gsheets_client.worksheet(config["google_sheets"]["results_tab_name"])
 
-        try:
-            ledger_ws = gsheets_client.open_by_key(sheet_id).worksheet(ledger_tab)
-        except Exception:
-            spreadsheet = gsheets_client.open_by_key(sheet_id)
-            ledger_ws = spreadsheet.add_worksheet(title=ledger_tab, rows="1000", cols="5")
-            ledger_ws.append_row(LEDGER_HEADERS)
+        # Guarantee all headers exist in correct order
+        row = []
+        for h in DEFAULT_HEADERS:
+            row.append(analysis_data.get(h, "N/A") or "N/A")
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ledger_ws.append_row([file_id, file_name or "Unknown", status, error, timestamp])
+        ws.append_row(row, value_input_option="RAW")
+        logging.info(f"SUCCESS: Wrote analysis result for '{analysis_data.get('Society Name','')}'")
+    except Exception as e:
+        logging.error(f"ERROR writing analysis result: {e}")
+        raise
+
+# =======================
+# Ledger Update
+# =======================
+def update_ledger(gsheets_client, file_id: str, status: str, error_msg: str, config: Dict, file_name: str):
+    """Update the ledger tab with processing status for each file."""
+    try:
+        ws = gsheets_client.worksheet(config["google_sheets"]["ledger_tab_name"])
+        records = ws.get_all_records()
+
+        row_index = None
+        for i, r in enumerate(records, start=2):  # row 1 = headers
+            if str(r.get("File ID")) == str(file_id):
+                row_index = i
+                break
+
+        if row_index:
+            ws.update_cell(row_index, 3, status)  # Status column
+            ws.update_cell(row_index, 4, error_msg[:500])  # Error column
+        else:
+            ws.append_row(
+                [file_id, file_name, status, error_msg[:500]],
+                value_input_option="RAW"
+            )
+
         logging.info(f"SUCCESS: Ledger updated → {file_name} ({status})")
     except Exception as e:
-        logging.error(f"ERROR updating ledger for {file_id}: {e}")
-
-
-# -----------------------
-# Main Data Sheet Functions
-# -----------------------
-def ensure_headers(ws, config: Dict):
-    """Ensure headers in the sheet match config.yaml exactly."""
-    global DEFAULT_HEADERS
-    expected_headers = config["sheets_headers"]
-    DEFAULT_HEADERS = expected_headers  # ✅ Keep backward compatibility
-
-    actual_headers = ws.row_values(1)
-
-    if actual_headers != expected_headers:
-        logging.warning("Header mismatch detected → fixing sheet headers.")
-        # Clear old headers and rewrite correct ones
-        ws.resize(rows=1)  # keep only 1 row
-        ws.clear()
-        ws.append_row(expected_headers, value_input_option="USER_ENTERED")
-        return expected_headers
-    return actual_headers
-
-
-def write_analysis_result(gsheets_client, analysis_data: Dict[str, str], config: Dict):
-    """Appends structured analysis results to the main Google Sheet."""
-    try:
-        sheet_id = config["google_sheets"]["sheet_id"]
-        results_tab = config["google_sheets"].get("results_tab_name", "Analysis Results")
-
-        # Ensure worksheet exists
-        try:
-            ws = gsheets_client.open_by_key(sheet_id).worksheet(results_tab)
-        except Exception:
-            spreadsheet = gsheets_client.open_by_key(sheet_id)
-            ws = spreadsheet.add_worksheet(title=results_tab, rows="1000", cols="50")
-            ws.append_row(config["sheets_headers"], value_input_option="USER_ENTERED")
-
-        headers = ensure_headers(ws, config)
-
-        # Prepare row
-        row = []
-        for h in headers:
-            val = analysis_data.get(h, "")
-            if isinstance(val, (list, dict)):
-                val = json.dumps(val, ensure_ascii=False)
-            row.append(str(val) if val is not None else "")
-
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        logging.info(f"SUCCESS: Wrote analysis result for '{analysis_data.get('Society Name', 'Unknown')}'")
-    except Exception as e:
-        logging.error(f"ERROR: Failed to write analysis result: {e}")
-
-
-def get_all_results(gsheets_client, config: Dict) -> List[Dict]:
-    """Fetches all rows from the Results sheet for dashboard export."""
-    try:
-        sheet_id = config["google_sheets"]["sheet_id"]
-        results_tab = config["google_sheets"].get("results_tab_name", "Analysis Results")
-        ws = gsheets_client.open_by_key(sheet_id).worksheet(results_tab)
-
-        ensure_headers(ws, config)
-
-        records = ws.get_all_records()
-        logging.info(f"Exported {len(records)} rows from Results sheet.")
-        return records
-    except Exception as e:
-        logging.error(f"ERROR: Could not fetch results for dashboard export: {e}")
-        return []
+        logging.error(f"ERROR updating ledger for file {file_name}: {e}")
