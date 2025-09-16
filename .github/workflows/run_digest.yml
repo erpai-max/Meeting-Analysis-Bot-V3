@@ -1,7 +1,7 @@
 name: Run Meeting Analysis Digest
 
 on:
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
   schedule:
     # Runs at 04:00 UTC on Friday → 9:30 AM IST Friday morning
     - cron: '0 4 * * 5'
@@ -31,12 +31,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
+
       - name: Generate and Send Digest
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}        # ✅ Sheets only
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}        # for Google Sheets access
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # for Gemini AI
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} # fallback AI
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}   # sender email
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}   # app password for email
         run: python digest_generator.py
