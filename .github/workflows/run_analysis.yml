@@ -1,9 +1,9 @@
 name: Run Meeting Analysis
 
 on:
-  workflow_dispatch:    # Allows manual runs
+  workflow_dispatch:    # Manual runs
   schedule:
-    - cron: '0 * * * *' # Runs every hour
+    - cron: '0 * * * *' # Every hour
 
 jobs:
   run-python-script:
@@ -33,14 +33,8 @@ jobs:
 
       - name: Execute analysis script
         env:
-          # 🔑 Google Service Account JSON (base64 encoded in repo secrets)
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-
-          # 🔑 AI keys (Gemini first, OpenRouter as fallback)
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-
-          # 🔑 HuggingFace token (only needed if diarization is enabled)
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}        # ✅ Only Sheets & Drive
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # ✅ For AI analysis
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} # ✅ Failover AI
+          HF_TOKEN: ${{ secrets.HF_TOKEN }} # Optional, for diarization
         run: python main.py
