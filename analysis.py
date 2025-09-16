@@ -4,14 +4,13 @@ import logging
 import sheets
 from faster_whisper import WhisperModel
 import google.generativeai as genai
-import httpx
 
 # -----------------------
 # Gemini Prompt Template
 # -----------------------
 GEMINI_PROMPT = """
 ### ROLE
-You are a senior **Sales Conversation Analyst** for society-management software (ERP + ASP).  
+You are a senior **Sales Conversation Analyst** for society-management software (ERP + ASP).
 
 ### PRODUCT CONTEXT
 ERP (₹12 + 18% GST per flat / month):
@@ -31,15 +30,15 @@ ASP (₹22.5 + 18% GST per flat / month):
 - Dedicated remote accountant, annual data backup  
 
 ### TASK
-1. Parse the transcript.  
-2. Fill in all fields in the schema below.  
-3. If data is not explicitly available, leave as `""`.  
-4. For multiple points, use **bulleted string format**:
+1. Parse the transcript.
+2. Fill in **all fields in the schema below**.
+3. If data is not explicitly available, leave as "".
+4. For multiple points, use **bulleted string format**.
 
 ### OUTPUT RULES
-- Output must be **valid JSON only** (no explanations, no markdown).  
-- Strictly follow the keys and order in the schema.  
-- All values must be strings, even numbers (e.g., `"85"`, `"3.5"`).  
+- Output must be **valid JSON only** (no explanations, no markdown).
+- Strictly follow the keys and order in the schema.
+- All values must be strings, even numbers (e.g., "85", "3.5").
 """
 
 # -----------------------
@@ -58,24 +57,25 @@ def transcribe_audio(file_path: str, config: dict) -> str:
         logging.error(f"ERROR during transcription: {e}")
         return ""
 
+
 # -----------------------
-# AI Analysis (Gemini + OpenRouter fallback)
+# AI Analysis
 # -----------------------
 def analyze_transcript(transcript: str, config: dict) -> dict:
-    """Calls Gemini API (fallback to OpenRouter) to analyze transcript and return structured JSON."""
+    """Calls Gemini (fallback OpenRouter) to analyze transcript and return structured JSON."""
     if not transcript.strip():
-        logging.warning("Transcript empty, skipping AI analysis.")
         return {}
+
+    prompt = GEMINI_PROMPT + "\n\nTranscript:\n" + transcript
 
     # Try Gemini first
     try:
         genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
         model = genai.GenerativeModel(config["analysis"].get("gemini_model", "gemini-1.5-flash"))
-
-        response = model.generate_content(GEMINI_PROMPT + "\n\nTranscript:\n" + transcript)
+        response = model.generate_content(prompt)
         raw_text = response.text.strip()
 
-        # Ensure only JSON is returned
+        # Clean code fences if present
         if raw_text.startswith("```"):
             raw_text = raw_text.strip("`")
             if raw_text.lower().startswith("json"):
@@ -83,44 +83,29 @@ def analyze_transcript(transcript: str, config: dict) -> dict:
 
         analysis_data = json.loads(raw_text)
         logging.info("SUCCESS: Parsed AI analysis JSON output (Gemini).")
-        return analysis_data
     except Exception as e:
-        logging.error(f"ERROR with Gemini API: {e}. Trying OpenRouter fallback...")
+        logging.error(f"Gemini failed, trying OpenRouter: {e}")
+        try:
+            import openai
+            openai.api_key = os.environ.get("OPENROUTER_API_KEY")
+            response = openai.ChatCompletion.create(
+                model=config["analysis"]["openrouter_model_name"],
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw_text = response["choices"][0]["message"]["content"].strip()
+            analysis_data = json.loads(raw_text)
+            logging.info("SUCCESS: Parsed AI analysis JSON output (OpenRouter).")
+        except Exception as e2:
+            logging.error(f"OpenRouter also failed: {e2}")
+            return {}
 
-    # Fallback → OpenRouter
-    try:
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY not set")
+    # Normalize to default headers
+    normalized = {}
+    for h in sheets.DEFAULT_HEADERS:
+        normalized[h] = str(analysis_data.get(h, "") or "")
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "https://github.com/erpai-max/Meeting-Analysis-Bot-V3",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"),
-            "messages": [
-                {"role": "system", "content": GEMINI_PROMPT},
-                {"role": "user", "content": transcript},
-            ],
-        }
+    return normalized
 
-        resp = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
-
-        raw_text = resp.json()["choices"][0]["message"]["content"].strip()
-        if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`")
-            if raw_text.lower().startswith("json"):
-                raw_text = raw_text[4:].strip()
-
-        analysis_data = json.loads(raw_text)
-        logging.info("SUCCESS: Parsed AI analysis JSON output (OpenRouter).")
-        return analysis_data
-    except Exception as e:
-        logging.error(f"ERROR with OpenRouter fallback: {e}")
-        return {}
 
 # -----------------------
 # Main File Processor
@@ -152,12 +137,11 @@ def process_single_file(drive_service, gsheets_client, file_meta, member_name: s
         # Step 4: Write to Google Sheets
         sheets.write_analysis_result(gsheets_client, analysis_data, config)
 
-        # Step 5: Log success in ledger
+        # Step 5: Update ledger
         sheets.update_ledger(gsheets_client, file_id, "Processed", "", config, file_name)
 
         logging.info(f"SUCCESS: Completed processing of {file_name}")
     except Exception as e:
         logging.error(f"ERROR processing {file_name}: {e}")
-        # Always log failure in ledger
         sheets.update_ledger(gsheets_client, file_id, "Failed", str(e), config, file_name)
         raise
