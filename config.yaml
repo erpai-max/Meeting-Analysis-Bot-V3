@@ -1,5 +1,5 @@
 # ===================================================================
-# CONFIGURATION FILE for Meeting Analysis Bot v4.6
+# CONFIGURATION FILE for Meeting Analysis Bot v4.7 (Sheets-only)
 # ===================================================================
 
 # -------------------
@@ -15,7 +15,7 @@ google_drive:
 # -------------------
 google_sheets:
   sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
-  results_tab_name: "Analysis Results"
+  results_tab_name: "Analysis Results"   # ✅ matches your sheet tab
   ledger_tab_name: "Processed Ledger"
 
 # -------------------
