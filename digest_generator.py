@@ -3,62 +3,86 @@ import yaml
 import logging
 import json
 import time
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from google.oauth2 import service_account
 import gspread
+from google.oauth2 import service_account
 import google.generativeai as genai
 
-# Import email formatter (with charts)
+# Import helpers
 import email_formatter
-import sheets  # ✅ reuse our sheets.py functions
+import sheets
 
 # =======================
 # Logging
 # =======================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# =======================
+# Authentication
+# =======================
+def authenticate_google_sheets(config: Dict):
+    """Authenticate with Google Sheets and return client + worksheet."""
+    try:
+        gcp_key_str = os.environ.get("GCP_SA_KEY")
+        if not gcp_key_str:
+            raise ValueError("Missing GCP_SA_KEY environment variable")
+
+        creds_info = json.loads(gcp_key_str)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+        client = gspread.authorize(creds)
+
+        sheet_id = config["google_sheets"]["sheet_id"]
+        return client.open_by_key(sheet_id)
+    except Exception as e:
+        logging.error(f"CRITICAL: Could not authenticate with Google Sheets: {e}")
+        raise
 
 # =======================
-# Data Fetching (Google Sheets instead of BQ)
+# Data Fetching
 # =======================
 def fetch_manager_data(gsheets_client, config: Dict, manager_name: str) -> List[Dict]:
-    """Fetches performance data for a manager's team (last 7 days + previous week)."""
+    """Fetches meeting data for a manager's team from Google Sheets (last 7 days)."""
     try:
-        all_records = sheets.get_all_results(gsheets_client, config)
-        manager_records = [r for r in all_records if r.get("Manager") == manager_name]
+        ws = gsheets_client.worksheet(config["google_sheets"]["results_tab_name"])
+        records = ws.get_all_records()
 
-        # Convert numeric fields safely
-        for r in manager_records:
+        # Convert dates and filter last 7 days
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(days=7)
+
+        manager_records = []
+        for r in records:
+            if str(r.get("Manager", "")).strip() != manager_name:
+                continue
             try:
-                r["Percent_Score"] = float(r.get("% Score") or 0)
-            except:
-                r["Percent_Score"] = 0.0
-            try:
-                r["Amount_Value"] = float(r.get("Amount Value") or 0)
-            except:
-                r["Amount_Value"] = 0.0
+                meeting_date = datetime.strptime(str(r.get("Date", "")), "%Y-%m-%d")
+            except Exception:
+                continue
+            if meeting_date >= cutoff:
+                manager_records.append(r)
 
         logging.info(f"Found {len(manager_records)} records for {manager_name}.")
         return manager_records
     except Exception as e:
-        logging.error(f"Could not fetch data for {manager_name}: {e}")
+        logging.error(f"Could not fetch data for manager {manager_name}: {e}")
         return []
-
 
 # =======================
 # Data Processing
 # =======================
-def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List[Dict], List[Dict]]:
-    """Aggregates raw data into KPIs, team performance list, and coaching notes."""
+def process_team_data(team_records: List[Dict]) -> Dict[str, Any]:
+    """Aggregates raw data into KPIs + team performance list."""
     total_meetings = len(team_records)
-    total_pipeline = sum(r["Amount_Value"] for r in team_records if r.get("Amount_Value"))
+    total_pipeline = sum(float(r.get("Amount Value") or 0) for r in team_records)
     avg_score = (
-        sum(r["Percent_Score"] for r in team_records if r.get("Percent_Score")) / total_meetings
-        if total_meetings > 0 else 0
+        sum(float(r.get("% Score") or 0) for r in team_records) / total_meetings
+        if total_meetings > 0
+        else 0
     )
 
     kpis = {
@@ -68,34 +92,30 @@ def process_team_data(team_records: List[Dict]) -> Tuple[Dict, List[Dict], List[
     }
 
     team_performance = []
-    reps = sorted(set(r.get("Owner (Who handled the meeting)") for r in team_records))
+    reps = sorted(set(r.get("Owner (Who handled the meeting)", "") for r in team_records))
     for rep in reps:
-        rep_meetings = [r for r in team_records if r.get("Owner (Who handled the meeting)") == rep]
+        rep_meetings = [r for r in team_records if r.get("Owner (Who handled the meeting)", "") == rep]
         rep_avg_score = (
-            sum(r["Percent_Score"] for r in rep_meetings if r.get("Percent_Score")) / len(rep_meetings)
+            sum(float(r.get("% Score") or 0) for r in rep_meetings) / len(rep_meetings)
             if rep_meetings else 0
         )
-        rep_pipeline = sum(r["Amount_Value"] for r in rep_meetings if r.get("Amount_Value"))
+        rep_pipeline = sum(float(r.get("Amount Value") or 0) for r in rep_meetings)
 
-        team_performance.append(
-            {
-                "owner": rep,
-                "meetings": len(rep_meetings),
-                "avg_score": rep_avg_score,
-                "pipeline": rep_pipeline,
-                "score_change": 0.0,  # WoW change removed (need history tracking for that)
-            }
-        )
+        team_performance.append({
+            "owner": rep,
+            "meetings": len(rep_meetings),
+            "avg_score": rep_avg_score,
+            "pipeline": rep_pipeline,
+            "score_change": 0  # (Optional WoW tracking if needed later)
+        })
 
-    coaching_notes = []  # optional extension
-    return kpis, sorted(team_performance, key=lambda x: x["avg_score"], reverse=True), coaching_notes
-
+    return kpis, sorted(team_performance, key=lambda x: x["avg_score"], reverse=True), []
 
 # =======================
 # AI Summary
 # =======================
 def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], config: Dict) -> str:
-    """Uses Gemini/OpenRouter to generate a 2–3 sentence executive summary."""
+    """Uses Gemini to generate a 2–3 sentence executive summary (fallback to OpenRouter if quota issue)."""
     logging.info(f"Generating AI summary for {manager_name}...")
 
     prompt = f"""
@@ -110,40 +130,26 @@ def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], co
 
     Team Performance:
     {json.dumps(team_data, indent=2)}
-
-    Summary:
     """
 
     try:
-        gemini_key = os.environ.get("GEMINI_API_KEY")
-        if gemini_key:
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel(config["analysis"]["gemini_model"])
-            response = model.generate_content(prompt)
-            return response.text.strip()
-
-        # Fallback → OpenRouter
-        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        if openrouter_key:
-            import httpx
-            url = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {openrouter_key}"}
-            data = {
-                "model": config["analysis"]["openrouter_model_name"],
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            resp = httpx.post(url, headers=headers, json=data, timeout=60)
-            if resp.status_code == 200:
-                return resp.json()["choices"][0]["message"]["content"].strip()
-            else:
-                logging.error(f"OpenRouter API failed: {resp.text}")
-                return "AI summary not available."
-
-        return "AI summary could not be generated."
+        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+        model = genai.GenerativeModel(config["analysis"]["gemini_model"])
+        response = model.generate_content(prompt)
+        return response.text.strip()
     except Exception as e:
-        logging.error(f"AI summary failed: {e}")
-        return "AI summary not available."
-
+        logging.error(f"Gemini failed, trying OpenRouter: {e}")
+        try:
+            import openai
+            openai.api_key = os.environ.get("OPENROUTER_API_KEY")
+            response = openai.ChatCompletion.create(
+                model=config["analysis"]["openrouter_model_name"],
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response["choices"][0]["message"]["content"].strip()
+        except Exception as e2:
+            logging.error(f"OpenRouter also failed: {e2}")
+            return "AI summary not available."
 
 # =======================
 # Email Sending
@@ -166,14 +172,12 @@ def send_email(subject: str, html_content: str, recipient: str):
     msg.attach(MIMEText(html_content, "html"))
 
     try:
-        import smtplib
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
             server.sendmail(sender, recipient, msg.as_string())
         logging.info(f"SUCCESS: Email sent to {recipient}")
     except Exception as e:
         logging.error(f"ERROR: Failed to send email: {e}")
-
 
 # =======================
 # Main
@@ -188,13 +192,10 @@ def main():
         logging.info("Weekly digest disabled in config.yaml. Exiting.")
         return
 
-    # Authenticate Sheets
-    gcp_key_str = os.environ.get("GCP_SA_KEY")
-    creds_info = json.loads(gcp_key_str)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
-    gsheets_client = gspread.authorize(creds)
+    # Auth Sheets
+    gsheets_client = authenticate_google_sheets(config)
 
+    # Loop managers
     manager_emails = config.get("manager_emails", {})
     if not manager_emails:
         logging.warning("No managers defined. Exiting.")
