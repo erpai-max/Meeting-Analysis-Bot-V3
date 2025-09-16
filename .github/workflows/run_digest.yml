@@ -1,10 +1,10 @@
 name: Run Meeting Analysis Digest
 
 on:
-  workflow_dispatch: # Manual trigger from GitHub Actions tab
+  workflow_dispatch: # Manual trigger
   schedule:
-    # Runs at 04:00 UTC on Monday → 9:30 AM IST Monday morning
-    - cron: '0 4 * * 1'
+    # Runs at 04:00 UTC on Friday → 9:30 AM IST Friday morning
+    - cron: '0 4 * * 5'
 
 jobs:
   generate-digest:
@@ -31,18 +31,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
+      
       - name: Generate and Send Digest
         env:
-          # 🔑 Google Service Account JSON (base64 encoded in repo secrets)
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-
-          # 🔑 AI keys (Gemini first, OpenRouter as fallback)
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}        # ✅ Sheets only
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-
-          # 🔑 Email sending credentials
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }} # Sender email
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }} # App Password (Gmail)
-
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
         run: python digest_generator.py
