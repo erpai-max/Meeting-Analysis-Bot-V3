@@ -37,7 +37,6 @@ def authenticate_google_services():
         scopes = [
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/bigquery",  # ✅ Added for BQ
         ]
         creds = service_account.Credentials.from_service_account_info(
             creds_info, scopes=scopes
@@ -191,18 +190,11 @@ def main():
                     except Exception as e:
                         error_message = f"Unhandled error in main loop for file {file_name}: {e}"
                         logging.error(error_message)
-
-                        # Quarantine file if something fails
-                        try:
-                            gdrive.quarantine_file(
-                                drive_service, file_id, folder_id, str(e), config
-                            )
-                        except Exception as qe:
-                            logging.error(f"Failed to quarantine {file_name}: {qe}")
-
-                        # Always log to ledger
+                        gdrive.quarantine_file(
+                            drive_service, file_id, folder_id, str(e), config
+                        )
                         sheets.update_ledger(
-                            gsheets_client, file_id, "Quarantined", str(e), config, file_name
+                            gsheets_client, file_id, "Quarantined", str(e), config, file_name  # ✅ pass file_name
                         )
             except Exception as e:
                 logging.error(f"CRITICAL ERROR while processing {member_name}'s folder: {e}")
