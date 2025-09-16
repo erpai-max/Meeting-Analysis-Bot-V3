@@ -1,5 +1,5 @@
 # ===================================================================
-# CONFIGURATION FILE for Meeting Analysis Bot v4.5
+# CONFIGURATION FILE for Meeting Analysis Bot v4.6
 # ===================================================================
 
 # -------------------
@@ -17,14 +17,6 @@ google_sheets:
   sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
   results_tab_name: "Analysis Results"
   ledger_tab_name: "Processed Ledger"
-
-# -------------------
-# Google BigQuery Configuration
-# -------------------
-google_bigquery:
-  project_id: "meeting-analysis-bot"
-  dataset_id: "meeting_analysis"
-  table_id: "analysis_results"
 
 # -------------------
 # Team and Manager Mapping
@@ -53,7 +45,7 @@ manager_emails:
   Pratik: "pratik.ray@nobroker.in"
 
 # -------------------
-# Headers for Sheets & BigQuery
+# Headers for Sheets
 # -------------------
 sheets_headers:
   - "Date"
