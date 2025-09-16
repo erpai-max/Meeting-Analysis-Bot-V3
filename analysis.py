@@ -9,54 +9,30 @@ import google.generativeai as genai
 # Gemini Prompt Template
 # -----------------------
 GEMINI_PROMPT = """
-### ROLE
-You are a senior Sales Conversation Analyst for society-management software (ERP + ASP).
+### ROLE AND GOAL ###
+You are an expert sales meeting analyst for our company, specializing in Society Management software.
 
-### PRODUCT CONTEXT
-ERP (₹12 + 18% GST per flat / month):
-- Tally import/export, e-invoicing, bank reconciliation, vendor accounting, budgeting, 350+ bill combinations
-- Purchase-order approvals, asset tagging via QR, inventory, meter reading → auto invoices
-- Maker-checker billing approvals, reminders, late fee calc
-- UPI/cards with in-house gateway, virtual accounts per unit
-- Preventive maintenance, role-based access, defaulter tracking
-- GST/TDS reports, balance sheet, dashboards  
+Analyze the provided meeting transcript, score the sales representative, and extract 47 structured fields.
+If a field is not explicitly available, return "N/A".
 
-ASP (₹22.5 + 18% GST per flat / month):
-- Managed accounting: computerized bills/receipts
-- Bookkeeping for all incomes/expenses
-- Bank reconciliation + suspense follow-up
-- Non-audited financial reports, finalisation support, audit coordination
-- Vendor & PO/WO management, inventory, amenities booking
-- Dedicated remote accountant, annual data backup  
-
-### TASK
-1. Parse the transcript.
-2. Fill in **all fields in the schema** from config headers.
-3. If data is not explicitly available, set value = "N/A".
-4. For multiple points, use **bulleted string format**.
-
-### OUTPUT RULES
-- Output must be **valid JSON only** (no explanations, no markdown).
-- Keys must exactly match the provided schema.
-- All values must be strings.
+Your output MUST be valid JSON only.
 """
 
 # -----------------------
 # Transcription
 # -----------------------
 def transcribe_audio(file_path: str, config: dict) -> str:
-    """Transcribes audio using Faster-Whisper."""
+    """Transcribes audio using Faster-Whisper with chunking for long files."""
     model_size = config["analysis"].get("whisper_model", "tiny.en")
     try:
         model = WhisperModel(model_size)
-        segments, _ = model.transcribe(file_path)
+        segments, _ = model.transcribe(file_path, chunk_size=30)  # FIXED: chunking
         transcript = " ".join([s.text for s in segments])
         logging.info(f"SUCCESS: Transcribed {len(transcript.split())} words.")
         return transcript
     except Exception as e:
         logging.error(f"ERROR during transcription: {e}")
         return ""
-
 
 # -----------------------
 # AI Analysis
@@ -66,10 +42,7 @@ def analyze_transcript(transcript: str, config: dict) -> dict:
     if not transcript.strip():
         return {}
 
-    headers = config.get("sheets_headers", [])
     prompt = GEMINI_PROMPT + "\n\nTranscript:\n" + transcript
-
-    analysis_data = {}
 
     # Try Gemini first
     try:
@@ -96,25 +69,23 @@ def analyze_transcript(transcript: str, config: dict) -> dict:
                 messages=[{"role": "user", "content": prompt}],
             )
             raw_text = response["choices"][0]["message"]["content"].strip()
-
-            if raw_text.startswith("```"):
-                raw_text = raw_text.strip("`")
-                if raw_text.lower().startswith("json"):
-                    raw_text = raw_text[4:].strip()
-
             analysis_data = json.loads(raw_text)
             logging.info("SUCCESS: Parsed AI analysis JSON output (OpenRouter).")
         except Exception as e2:
             logging.error(f"OpenRouter also failed: {e2}")
             return {}
 
-    # Normalize → Always align to config headers
+    # Normalize with headers
     normalized = {}
-    for h in headers:
-        normalized[h] = str(analysis_data.get(h, "N/A") or "N/A")
+    for h in sheets.DEFAULT_HEADERS:
+        normalized[h] = str(analysis_data.get(h, "") or "N/A")
+
+    # FIXED: check for empty result
+    if all(v == "N/A" for v in normalized.values()):
+        logging.error("AI returned empty analysis result.")
+        return {}
 
     return normalized
-
 
 # -----------------------
 # Main File Processor
@@ -139,9 +110,7 @@ def process_single_file(drive_service, gsheets_client, file_meta, member_name: s
             raise ValueError("Empty analysis result")
 
         # Step 3: Add metadata
-        analysis_data["Owner (Who handled the meeting)"] = member_name or "N/A"
-        analysis_data["Media Link"] = f"https://drive.google.com/file/d/{file_id}/view"
-        analysis_data["Doc Link"] = "N/A"  # placeholder if no doc
+        analysis_data["Owner (Who handled the meeting)"] = member_name
         analysis_data["File Name"] = file_name
         analysis_data["File ID"] = file_id
 
