@@ -5,6 +5,7 @@ import sheets
 from faster_whisper import WhisperModel
 import google.generativeai as genai
 
+
 # -----------------------
 # Gemini Prompt Template
 # -----------------------
@@ -40,6 +41,7 @@ ASP (₹22.5 + 18% GST per flat / month):
 - Strictly follow the keys and order in the schema.
 - All values must be strings, even numbers (e.g., "85", "3.5").
 """
+
 
 # -----------------------
 # Transcription
@@ -99,9 +101,9 @@ def analyze_transcript(transcript: str, config: dict) -> dict:
             logging.error(f"OpenRouter also failed: {e2}")
             return {}
 
-    # Normalize to default headers
+    # ✅ Normalize to headers from config
     normalized = {}
-    for h in sheets.DEFAULT_HEADERS:
+    for h in config["sheets_headers"]:
         normalized[h] = str(analysis_data.get(h, "") or "")
 
     return normalized
