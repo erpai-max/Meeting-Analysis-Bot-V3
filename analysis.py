@@ -2,10 +2,8 @@ import os
 import json
 import logging
 import sheets
-from google.cloud import bigquery
 from faster_whisper import WhisperModel
 import google.generativeai as genai
-import httpx
 
 # -----------------------
 # Gemini Prompt Template
@@ -59,90 +57,62 @@ def transcribe_audio(file_path: str, config: dict) -> str:
         logging.error(f"ERROR during transcription: {e}")
         return ""
 
+
 # -----------------------
-# AI Analysis with Failover
+# AI Analysis (Gemini + OpenRouter fallback)
 # -----------------------
 def analyze_transcript(transcript: str, config: dict) -> dict:
-    """Analyze transcript using Gemini API, fallback to OpenRouter if quota exceeded."""
+    """Calls Gemini API (with OpenRouter fallback) to analyze transcript and return structured JSON."""
+    prompt = GEMINI_PROMPT + "\n\nTranscript:\n" + transcript
+
+    # --- Try Gemini ---
     try:
         genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
         model = genai.GenerativeModel(config["analysis"].get("gemini_model", "gemini-1.5-flash"))
-        response = model.generate_content(GEMINI_PROMPT + "\n\nTranscript:\n" + transcript)
+        response = model.generate_content(prompt)
         raw_text = response.text.strip()
-    except Exception as e:
-        logging.warning(f"Gemini failed: {e}. Trying OpenRouter fallback...")
-        try:
-            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-            if not openrouter_key:
-                raise RuntimeError("No OpenRouter API key set")
 
-            headers = {
-                "Authorization": f"Bearer {openrouter_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": config["analysis"].get(
-                    "openrouter_model_name",
-                    "nousresearch/nous-hermes-2-mistral-7b-dpo"
-                ),
-                "messages": [
-                    {"role": "system", "content": GEMINI_PROMPT},
-                    {"role": "user", "content": transcript},
-                ],
-            }
-            resp = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-            resp.raise_for_status()
-            raw_text = resp.json()["choices"][0]["message"]["content"]
-        except Exception as e2:
-            logging.error(f"Fallback also failed: {e2}")
-            return {}
+        if raw_text.startswith("```"):
+            raw_text = raw_text.strip("`")
+            if raw_text.lower().startswith("json"):
+                raw_text = raw_text[4:].strip()
 
-    # Ensure only JSON is returned
-    raw_text = raw_text.strip()
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.lower().startswith("json"):
-            raw_text = raw_text[4:].strip()
-
-    try:
         analysis_data = json.loads(raw_text)
-        logging.info("SUCCESS: Parsed AI analysis JSON output.")
+        logging.info("SUCCESS: Parsed AI analysis JSON output (Gemini).")
         return analysis_data
     except Exception as e:
-        logging.error(f"ERROR parsing AI output: {e}")
+        logging.warning(f"Gemini failed, trying OpenRouter... ({e})")
+
+    # --- Fallback: OpenRouter ---
+    try:
+        import httpx
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY')}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": config["analysis"].get("openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"),
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant that outputs ONLY valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        resp = httpx.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        raw_text = resp.json()["choices"][0]["message"]["content"].strip()
+        analysis_data = json.loads(raw_text)
+        logging.info("SUCCESS: Parsed AI analysis JSON output (OpenRouter).")
+        return analysis_data
+    except Exception as e:
+        logging.error(f"ERROR during AI analysis fallback: {e}")
         return {}
 
-# -----------------------
-# BigQuery (Safe for Free Tier)
-# -----------------------
-def write_to_bigquery(record: dict, config: dict):
-    """Inserts a normalized record into BigQuery table (skips if free-tier blocks streaming)."""
-    try:
-        project_id = config["google_bigquery"]["project_id"]
-        dataset_id = config["google_bigquery"]["dataset_id"]
-        table_id = config["google_bigquery"]["table_id"]
-
-        client = bigquery.Client(project=project_id)
-        table_ref = f"{project_id}.{dataset_id}.{table_id}"
-
-        normalized = sheets.normalize_for_bigquery(record)
-        errors = client.insert_rows_json(table_ref, [normalized])
-
-        if errors:
-            logging.error(f"BigQuery insert errors: {errors}")
-        else:
-            logging.info("SUCCESS: Row inserted into BigQuery.")
-    except Exception as e:
-        if "Streaming insert is not allowed" in str(e):
-            logging.warning("⚠️ BigQuery streaming insert blocked (free tier). Skipping insert.")
-        else:
-            logging.error(f"ERROR inserting into BigQuery: {e}")
 
 # -----------------------
 # Main File Processor
 # -----------------------
 def process_single_file(drive_service, gsheets_client, file_meta, member_name: str, config: dict):
-    """Processes one file: download → transcribe → analyze → save to Sheets & BigQuery."""
+    """Processes one file: download → transcribe → analyze → save to Sheets."""
     from gdrive import download_file
 
     file_id = file_meta["id"]
@@ -168,10 +138,7 @@ def process_single_file(drive_service, gsheets_client, file_meta, member_name: s
         # Step 4: Write to Google Sheets
         sheets.write_analysis_result(gsheets_client, analysis_data, config)
 
-        # Step 5: Write to BigQuery (skipped if free tier blocks)
-        write_to_bigquery(analysis_data, config)
-
-        # Step 6: Log success in ledger
+        # Step 5: Log success in ledger
         sheets.update_ledger(gsheets_client, file_id, "Processed", "", config, file_name)
 
         logging.info(f"SUCCESS: Completed processing of {file_name}")
