@@ -5,9 +5,16 @@ import json
 import gspread
 
 # -----------------------
+# Default Headers (for backward compatibility)
+# -----------------------
+DEFAULT_HEADERS = []  # Will be filled dynamically from config
+
+
+# -----------------------
 # Ledger Headers
 # -----------------------
 LEDGER_HEADERS = ["File ID", "File Name", "Status", "Error", "Timestamp"]
+
 
 # -----------------------
 # Ledger Functions
@@ -53,7 +60,10 @@ def update_ledger(gsheets_client, file_id: str, status: str, error: str, config:
 # -----------------------
 def ensure_headers(ws, config: Dict):
     """Ensure headers in the sheet match config.yaml exactly."""
+    global DEFAULT_HEADERS
     expected_headers = config["sheets_headers"]
+    DEFAULT_HEADERS = expected_headers  # ✅ Keep backward compatibility
+
     actual_headers = ws.row_values(1)
 
     if actual_headers != expected_headers:
