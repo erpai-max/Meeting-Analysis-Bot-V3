@@ -6,60 +6,6 @@ import os
 import json
 
 # =======================
-# Default Headers (47 cols)
-# =======================
-DEFAULT_HEADERS = [
-    "Date",
-    "POC Name",
-    "Society Name",
-    "Visit Type",
-    "Meeting Type",
-    "Amount Value",
-    "Months",
-    "Deal Status",
-    "Vendor Leads",
-    "Society Leads",
-    "Opening Pitch Score",
-    "Product Pitch Score",
-    "Cross-Sell / Opportunity Handling",
-    "Closing Effectiveness",
-    "Negotiation Strength",
-    "Rebuttal Handling",
-    "Overall Sentiment",
-    "Total Score",
-    "% Score",
-    "Risks / Unresolved Issues",
-    "Improvements Needed",
-    "Owner (Who handled the meeting)",
-    "Email Id",
-    "Kibana ID",
-    "Manager",
-    "Product Pitch",
-    "Team",
-    "Media Link",
-    "Doc Link",
-    "Suggestions & Missed Topics",
-    "Pre-meeting brief",
-    "Meeting duration (min)",
-    "Rapport Building",
-    "Improvement Areas",
-    "Product Knowledge Displayed",
-    "Call Effectiveness and Control",
-    "Next Step Clarity and Commitment",
-    "Missed Opportunities",
-    "Key Discussion Points",
-    "Key Questions",
-    "Competition Discussion",
-    "Action items",
-    "Positive Factors",
-    "Negative Factors",
-    "Customer Needs",
-    "Overall Client Sentiment",
-    "Feature Checklist Coverage",
-    "Manager Email"
-]
-
-# =======================
 # Authenticate Sheets
 # =======================
 def authenticate_google_sheets(config: Dict):
@@ -71,7 +17,9 @@ def authenticate_google_sheets(config: Dict):
 
         creds_info = json.loads(gcp_key_str)
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+        creds = service_account.Credentials.from_service_account_info(
+            creds_info, scopes=scopes
+        )
         client = gspread.authorize(creds)
         sheet = client.open_by_key(config["google_sheets"]["sheet_id"])
         return sheet
@@ -86,14 +34,14 @@ def write_analysis_result(gsheets_client, analysis_data: Dict, config: Dict):
     """Append a normalized analysis row into the Results sheet."""
     try:
         ws = gsheets_client.worksheet(config["google_sheets"]["results_tab_name"])
+        headers = config.get("sheets_headers", [])
 
-        # Guarantee all headers exist in correct order
-        row = []
-        for h in DEFAULT_HEADERS:
-            row.append(analysis_data.get(h, "N/A") or "N/A")
+        row = [analysis_data.get(h, "N/A") or "N/A" for h in headers]
 
         ws.append_row(row, value_input_option="RAW")
-        logging.info(f"SUCCESS: Wrote analysis result for '{analysis_data.get('Society Name','')}'")
+        logging.info(
+            f"SUCCESS: Wrote analysis result for '{analysis_data.get('Society Name','')}'"
+        )
     except Exception as e:
         logging.error(f"ERROR writing analysis result: {e}")
         raise
@@ -101,7 +49,14 @@ def write_analysis_result(gsheets_client, analysis_data: Dict, config: Dict):
 # =======================
 # Ledger Update
 # =======================
-def update_ledger(gsheets_client, file_id: str, status: str, error_msg: str, config: Dict, file_name: str):
+def update_ledger(
+    gsheets_client,
+    file_id: str,
+    status: str,
+    error_msg: str,
+    config: Dict,
+    file_name: str,
+):
     """Update the ledger tab with processing status for each file."""
     try:
         ws = gsheets_client.worksheet(config["google_sheets"]["ledger_tab_name"])
@@ -114,14 +69,27 @@ def update_ledger(gsheets_client, file_id: str, status: str, error_msg: str, con
                 break
 
         if row_index:
-            ws.update_cell(row_index, 3, status)  # Status column
-            ws.update_cell(row_index, 4, error_msg[:500])  # Error column
+            ws.update_cell(row_index, 3, status)  # Status
+            ws.update_cell(row_index, 4, error_msg[:500])  # Error
         else:
             ws.append_row(
                 [file_id, file_name, status, error_msg[:500]],
-                value_input_option="RAW"
+                value_input_option="RAW",
             )
 
         logging.info(f"SUCCESS: Ledger updated → {file_name} ({status})")
     except Exception as e:
         logging.error(f"ERROR updating ledger for file {file_name}: {e}")
+
+# =======================
+# Fetch Processed File IDs
+# =======================
+def get_processed_file_ids(gsheets_client, config: Dict) -> List[str]:
+    """Return all processed file IDs from the ledger."""
+    try:
+        ws = gsheets_client.worksheet(config["google_sheets"]["ledger_tab_name"])
+        records = ws.get_all_records()
+        return [str(r.get("File ID", "")).strip() for r in records if r.get("File ID")]
+    except Exception as e:
+        logging.error(f"ERROR fetching processed file IDs: {e}")
+        return []
