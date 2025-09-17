@@ -1,38 +1,22 @@
-# -------------------
 # Core Google Libraries
-# -------------------
 google-api-python-client>=2.125.0
 google-auth>=2.22.0
 google-auth-oauthlib>=1.1.0
 gspread>=5.7.2
 
-# -------------------
 # AI & Transcription
-# -------------------
 google-generativeai>=0.5.4
 faster-whisper>=0.10.0
-openai>=1.40.0   # For OpenRouter failover
-httpx>=0.27.0    # Safer OpenRouter + OpenAI requests
-sentencepiece>=0.1.99
+openai>=1.40.0
+httpx>=0.27.0
 
-# -------------------
-# Optional (for diarization in config.yml)
-# Uncomment only if you enable diarization
-# pyannote.audio==3.1.1
-# torch==2.3.0
-
-# -------------------
 # Utilities
-# -------------------
 pyyaml>=6.0.1
 tenacity>=8.2.3
 requests>=2.31.0
 pandas>=2.1.0
 numpy>=1.26.0
-python-dotenv>=1.0.0
 
-# -------------------
-# Visualization for Digest Emails
-# -------------------
+# Visualization (optional for digest)
 matplotlib>=3.7.2
 pillow>=10.0.0
