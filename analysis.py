@@ -1,135 +1,233 @@
-# --- keep your imports ---
 import os
+import re
 import json
 import logging
-import sheets
+from typing import Dict, Any
 from faster_whisper import WhisperModel
 import google.generativeai as genai
 
-# -------------- Transcription --------------
-def transcribe_audio(file_path: str, config: dict) -> str:
-    """
-    Transcribes (or translates-to-English) audio using Faster-Whisper.
-    """
-    model_size = config["analysis"].get("whisper_model", "small")
-    task = config["analysis"].get("whisper_task", "translate")   # "translate" or "transcribe"
-    beam_size = int(config["analysis"].get("whisper_beam_size", 3))
-
-    initial_prompt = (
-        "Indian society management, ERP, ASP, accounting, Tally, GST, "
-        "bank reconciliation, maker-checker, billing combinations, maintenance charges, "
-        "late fee calculation, virtual accounts, vendor, PO/WO, preventive maintenance."
-    )
-
-    try:
-        logging.info(f"Loading faster-whisper: {model_size} on cpu")
-        model = WhisperModel(model_size, device="cpu")
-
-        logging.info(f"Processing audio with Faster-Whisper (task={task}, beam_size={beam_size})")
-        segments, info = model.transcribe(
-            file_path,
-            task=task,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
-            beam_size=beam_size,
-            best_of=beam_size,
-            initial_prompt=initial_prompt,
-            condition_on_previous_text=False
-        )
-
-        # IMPORTANT: no raw '%' in logging format strings (use f-string instead)
-        if info and getattr(info, "language", None) is not None:
-            prob = float(getattr(info, "language_probability", 0.0))
-            logging.info(f"Detected language '{info.language}' with probability {prob:.2f}")
-
-        transcript_parts = []
-        for s in segments:
-            if getattr(s, "text", ""):
-                transcript_parts.append(s.text.strip())
-
-        transcript = " ".join(transcript_parts).strip()
-        logging.info(f"SUCCESS: Transcribed {len(transcript.split())} words.")
-        return transcript
-    except TypeError as te:
-        logging.error(f"Transcription TypeError (retrying minimal): {te}")
-        try:
-            segments, info = model.transcribe(file_path, task=task)
-            transcript = " ".join(s.text.strip() for s in segments if getattr(s, "text", "").strip())
-            logging.info(f"SUCCESS (retry minimal): {len(transcript.split())} words.")
-            return transcript
-        except Exception as e2:
-            logging.error(f"Retry transcription failed: {e2}")
-            return ""
-    except Exception as e:
-        logging.error(f"ERROR during transcription: {e}")
-        return ""
+import sheets
+from gdrive import move_to_processed, quarantine_file
 
 
-# -------------- AI Analysis --------------
-def analyze_transcript(transcript: str, config: dict) -> dict:
-    """Calls Gemini (fallback OpenRouter) to analyze transcript and return structured JSON."""
-    if not transcript.strip():
-        return {}
+# -----------------------
+# Helpers
+# -----------------------
 
-    # Load prompt text from file (prompt.txt sits next to the script)
+def _load_prompt(owner_name: str) -> str:
+    """Load prompt.txt and inject owner_name placeholder if present."""
     try:
         with open("prompt.txt", "r", encoding="utf-8") as f:
-            prompt_template = f.read()
-    except Exception:
-        # Safe fallback if file not found
-        prompt_template = (
-            "You are a sales meeting analyst. Output JSON only with the requested keys. "
-            "If something is missing, use 'N/A'.\n\n{transcript}"
+            prompt = f.read()
+        return prompt.replace("{owner_name}", owner_name)
+    except Exception as e:
+        logging.warning(f"Could not read prompt.txt; using minimal inline prompt. Error: {e}")
+        return (
+            "You are an expert sales meeting analyst. "
+            "Return a single JSON object with the exact 47 keys I provide. "
+            "If a field is not present, return \"N/A\". "
+            "All values must be strings."
         )
 
-    prompt = prompt_template.format(owner_name=config.get("owner_name", "N/A"), transcript=transcript)
 
-    # Try Gemini first
+def _clean_and_parse_json(raw_text: str) -> Dict[str, Any]:
+    """
+    Try very hard to extract a single JSON object from a model response.
+    Handles code fences, leading text, trailing commentary, etc.
+    """
+    if not raw_text:
+        raise ValueError("Empty model response")
+
+    txt = raw_text.strip()
+
+    # Strip typical fences: ```json ... ``` or ``` ...
+    if txt.startswith("```"):
+        # remove leading and trailing ```
+        txt = re.sub(r"^```(?:json)?", "", txt, flags=re.IGNORECASE).strip()
+        txt = re.sub(r"```$", "", txt).strip()
+
+    # Find the first {...} block
+    start = txt.find("{")
+    end = txt.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = txt[start : end + 1]
+    else:
+        # As a last resort, try to balance braces quickly
+        braces = 0
+        start_idx = None
+        for i, ch in enumerate(txt):
+            if ch == "{":
+                if braces == 0:
+                    start_idx = i
+                braces += 1
+            elif ch == "}":
+                braces -= 1
+                if braces == 0 and start_idx is not None:
+                    candidate = txt[start_idx : i + 1]
+                    break
+        else:
+            raise ValueError("Could not locate a JSON object in model response")
+
+    # Now parse
     try:
-        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-        model = genai.GenerativeModel(config["analysis"].get("gemini_model", "gemini-1.5-flash"))
-        response = model.generate_content(prompt)
-        raw_text = (response.text or "").strip()
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        # Gentle repairs for very common issues:
+        repaired = candidate
 
-        # Clean code fences if present
-        if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`")
-            if raw_text.lower().startswith("json"):
-                raw_text = raw_text[4:].strip()
+        # Remove trailing commas before } or ]
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
 
-        analysis_data = json.loads(raw_text)
-        logging.info("SUCCESS: Parsed AI analysis JSON output (Gemini).")
-    except Exception as e:
-        logging.error(f"Gemini failed, trying OpenRouter: {e}")
+        # Replace fancy quotes
+        repaired = repaired.replace("“", '"').replace("”", '"').replace("’", "'")
+
+        # Sometimes models put keys quoted twice or with stray newlines before the key
+        repaired = re.sub(r'\n\s*(")', r'\1', repaired)
+
         try:
-            import openai
-            openai.api_key = os.environ.get("OPENROUTER_API_KEY")
-            response = openai.ChatCompletion.create(
-                model=config["analysis"]["openrouter_model_name"],
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw_text = response["choices"][0]["message"]["content"].strip()
-            analysis_data = json.loads(raw_text)
-            logging.info("SUCCESS: Parsed AI analysis JSON output (OpenRouter).")
+            return json.loads(repaired)
         except Exception as e2:
-            logging.error(f"OpenRouter also failed: {e2}")
-            return {}
+            logging.error(f"JSON parse failed. First 200 chars:\n{candidate[:200]}")
+            raise ValueError(f"Failed to parse JSON from model output: {e2}") from e
 
-    # Normalize to sheet headers (fill N/A for any missing)
-    normalized = {}
+
+def _normalize_to_headers(data: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Map model JSON (whatever it returns) to our exact 47 headers,
+    converting everything to strings and filling missing with 'N/A'.
+    """
+    normalized: Dict[str, str] = {}
     for h in sheets.DEFAULT_HEADERS:
-        val = analysis_data.get(h, "")
-        normalized[h] = str(val if val not in (None, "", []) else "N/A")
-
+        val = data.get(h, "N/A")
+        # Force string for all values
+        try:
+            s = str(val).strip()
+            normalized[h] = s if s else "N/A"
+        except Exception:
+            normalized[h] = "N/A"
     return normalized
 
 
-# -------------- Main per-file pipeline --------------
-def process_single_file(drive_service, gsheets_client, file_meta, member_name: str, config: dict):
+# -----------------------
+# Transcription
+# -----------------------
+
+def transcribe_audio(file_path: str, config: dict) -> str:
     """
-    Processes one file: download → normalize → transcribe → analyze → write to Sheets → move to Processed.
+    Transcribe with Faster-Whisper (no unsupported kwargs).
+    If language is not English, we auto-translate to English for analysis.
     """
-    from gdrive import download_file, move_to_processed
+    model_size = config["analysis"].get("whisper_model", "small")
+    device = config["analysis"].get("whisper_device", "cpu")
+    compute_type = "int8" if device == "cpu" else "float16"
+
+    logging.info(f"Loading faster-whisper: {model_size} on {device}")
+    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+
+    # We’ll run in translate mode so you get English text for the prompt
+    logging.info("Processing audio with Faster-Whisper (task=translate, beam_size=3)")
+    segments, info = model.transcribe(
+        file_path,
+        task="translate",
+        beam_size=3,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 500},
+    )
+
+    if info and getattr(info, "language", None):
+        try:
+            logging.info(f"Detected language '{info.language}' with probability {getattr(info, 'language_probability', 0):.2f}")
+        except Exception:
+            logging.info(f"Detected language '{info.language}'")
+
+    text_chunks = [seg.text for seg in segments]
+    transcript = " ".join(text_chunks).strip()
+
+    if not transcript:
+        logging.warning("Transcription produced empty text.")
+    else:
+        logging.info(f"SUCCESS: Transcribed {len(transcript.split())} words.")
+    return transcript
+
+
+# -----------------------
+# LLM Analysis
+# -----------------------
+
+def _call_gemini(prompt: str, transcript: str, model_name: str) -> str:
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+    model = genai.GenerativeModel(model_name)
+    resp = model.generate_content(prompt.replace("{transcript}", transcript))
+    # Some SDK versions expose .text, others in candidates. Handle both.
+    text = getattr(resp, "text", None)
+    if not text and getattr(resp, "candidates", None):
+        parts = getattr(resp.candidates[0], "content", None)
+        if parts and getattr(parts, "parts", None):
+            text = "".join(getattr(p, "text", "") for p in parts.parts)
+    if not text:
+        raise ValueError("Gemini returned empty text")
+    return text.strip()
+
+
+def _call_openrouter(prompt: str, transcript: str, model_name: str) -> str:
+    from openai import OpenAI
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY not set")
+
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+    completion = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt.replace("{transcript}", transcript)}],
+        temperature=0.2,
+    )
+    return completion.choices[0].message.content.strip()
+
+
+def analyze_transcript(transcript: str, owner_name: str, config: dict) -> Dict[str, str]:
+    """
+    Call LLM (Gemini first, then OpenRouter fallback), extract JSON robustly,
+    and map to the 47 headers.
+    """
+    if not transcript.strip():
+        return _normalize_to_headers({})  # all N/A
+
+    prompt = _load_prompt(owner_name)
+
+    # 1) Try Gemini
+    try:
+        model_name = config["analysis"].get("gemini_model", "gemini-1.5-flash")
+        raw = _call_gemini(prompt, transcript, model_name)
+        parsed = _clean_and_parse_json(raw)
+        logging.info("SUCCESS: Parsed AI analysis JSON output (Gemini).")
+        return _normalize_to_headers(parsed)
+    except Exception as e:
+        logging.error(f"Gemini failed, trying OpenRouter: {e}")
+
+    # 2) Try OpenRouter
+    try:
+        or_model = config["analysis"].get(
+            "openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"
+        )
+        raw = _call_openrouter(prompt, transcript, or_model)
+        parsed = _clean_and_parse_json(raw)
+        logging.info("SUCCESS: Parsed AI analysis JSON output (OpenRouter).")
+        return _normalize_to_headers(parsed)
+    except Exception as e2:
+        logging.error(f"OpenRouter also failed. Falling back to all N/A. Error: {e2}")
+        return _normalize_to_headers({})
+
+
+# -----------------------
+# Main File Processor
+# -----------------------
+
+def process_single_file(drive_service, gsheets, file_meta, member_name: str, config: dict):
+    """
+    download → transcribe → analyze → write to Sheets → move to Processed
+    On failure, move to Quarantined.
+    """
+    from gdrive import download_file
 
     file_id = file_meta["id"]
     file_name = file_meta.get("name", "Unknown")
@@ -138,42 +236,46 @@ def process_single_file(drive_service, gsheets_client, file_meta, member_name: s
         logging.info(f"Downloading file: {file_name}")
         local_path = download_file(drive_service, file_id, file_name)
 
-        # (Optional) normalize with ffmpeg if your main.py doesn't already normalize
-        # If main.py already does ffmpeg, you can remove the following two lines.
-        # from gdrive import normalize_audio_16k
-        # local_path = normalize_audio_16k(local_path)
-
-        # Step 1: Transcription
+        # Step 1: Transcribe
         transcript = transcribe_audio(local_path, config)
 
-        # Step 2: AI Analysis
-        analysis_data = analyze_transcript(transcript, config)
-        if not analysis_data:
-            raise ValueError("Empty analysis result")
+        # Step 2: Analyze (LLM)
+        analysis_data = analyze_transcript(transcript, member_name, config)
 
-        # Step 3: Add metadata
-        analysis_data["Owner (Who handled the meeting)"] = analysis_data.get("Owner (Who handled the meeting)", "N/A") or member_name
-        analysis_data["Media Link"] = file_name
-        analysis_data["Manager Email"] = analysis_data.get("Manager Email", "N/A")
+        # Step 3: Add/override metadata
+        analysis_data["Owner (Who handled the meeting)"] = member_name or "N/A"
+        analysis_data["Media Link"] = file_name or "N/A"   # helps you trace source
+        # (We no longer push BigQuery, so we do not add File ID/Name into sheet columns unless you add headers)
 
         # Step 4: Write to Google Sheets
-        sheets.write_analysis_result(gsheets_client, analysis_data, config)
+        sheets.write_analysis_result(gsheets, analysis_data, config)
 
-        # Step 5: Update ledger & move to processed
-        sheets.update_ledger(gsheets_client, file_id, "Processed", "", config, file_name)
-
+        # Step 5: Move to Processed folder
         try:
             move_to_processed(drive_service, file_id, config)
-        except Exception as move_err:
-            logging.error(f"Could not move file to Processed folder: {move_err}")
+        except Exception as e_move:
+            logging.warning(f"Processed successfully, but could not move to Processed: {e_move}")
+
+        # Step 6: Ledger (success)
+        try:
+            sheets.update_ledger(gsheets, file_id, "Processed", "", config, file_name)
+        except Exception as e_ledger:
+            logging.warning(f"Processed but could not update ledger: {e_ledger}")
 
         logging.info(f"SUCCESS: Completed processing of {file_name}")
+
     except Exception as e:
         logging.error(f"ERROR processing {file_name}: {e}")
-        from gdrive import quarantine_file
+        # Quarantine + ledger on failure
         try:
-            quarantine_file(drive_service, file_id, "", str(e), config)
+            quarantine_file(drive_service, file_id, file_meta.get("parents", [""])[0] if file_meta.get("parents") else "", str(e), config)
         except Exception as qe:
-            logging.error(f"ERROR quarantining file {file_name}: {qe}")
-        sheets.update_ledger(gsheets_client, file_id, "Failed", str(e), config, file_name)
+            logging.error(f"Could not quarantine file {file_name}: {qe}")
+
+        try:
+            sheets.update_ledger(gsheets, file_id, "Failed", str(e), config, file_name)
+        except Exception as e_ledger:
+            logging.error(f"ERROR updating ledger for file {file_name}: {e_ledger}")
+
+        # Re-raise so main can log as “Unhandled error …”
         raise
