@@ -1,26 +1,27 @@
 name: Run Meeting Analysis Digest
 
 on:
-  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
+  workflow_dispatch:    # manual trigger
   schedule:
-    # Runs at 04:00 UTC on Friday → 9:30 AM IST Friday morning
-    - cron: '0 4 * * 5'
+    # Monday at 04:00 UTC (≈ 09:30 IST Monday)
+    - cron: '0 4 * * 1'
 
 jobs:
   generate-digest:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
+      - name: Cache pip
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -32,11 +33,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Generate and Send Digest
+      - name: Generate and send digest
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}        # for Google Sheets access
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # for Gemini AI
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} # fallback AI
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}   # sender email
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}   # app password for email
-        run: python digest_generator.py
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional failover
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}             # sender email
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}             # app password
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}                       # optional
+        run: |
+          python digest_generator.py
