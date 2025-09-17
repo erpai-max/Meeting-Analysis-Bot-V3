@@ -1,27 +1,25 @@
 name: Run Meeting Analysis Digest
 
 on:
-  workflow_dispatch:    # manual trigger
+  workflow_dispatch:
   schedule:
-    # Monday at 04:00 UTC (≈ 09:30 IST Monday)
-    - cron: '0 4 * * 1'
+    - cron: '0 4 * * 1' # Mondays 04:00 UTC ~ 9:30 AM IST
 
 jobs:
   generate-digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Cache pip
-        uses: actions/cache@v4
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -33,13 +31,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Generate and send digest
+      - name: Generate and Send Digest
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional failover
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}             # sender email
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}             # app password
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}                       # optional
-        run: |
-          python digest_generator.py
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        run: python digest_generator.py
