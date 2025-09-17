@@ -1,244 +1,487 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta charset="utf-8" />
   <title>Meeting Analysis Dashboard</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    .card-style { background: white; border-radius: 1rem; padding: 1rem; box-shadow: 0 4px 14px rgba(0,0,0,0.1);}
-    body.dark { background: #0f172a; color: #f1f5f9; }
-    body.dark .card-style { background: #1e293b; color: #f1f5f9; }
-    .tab-button { padding:0.5rem 1rem; border-radius:9999px; }
-    .tab-button.active { background:#2563eb; color:white; }
-    .tab-content { display:none; }
-    .tab-content.active { display:block; }
+    :root{
+      --bg:#f3f4f6; --card:#ffffff; --muted:#6b7280; --accent:#0b63d6; --success:#059669;
+      --radius:12px; --gap:14px; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    body{margin:0;background:var(--bg);color:#0f172a}
+    .wrap{max-width:1200px;margin:28px auto;padding:18px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
+    h1{font-size:20px;margin:0}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .card-row{display:flex;gap:12px;margin-bottom:18px;flex-wrap:wrap}
+    .card{background:var(--card);border-radius:var(--radius);padding:14px;box-shadow:0 1px 2px rgba(15,23,42,0.04);min-width:160px;flex:1}
+    .card h3{margin:0;font-size:12px;color:var(--muted)}
+    .card p{margin:6px 0 0;font-size:20px;font-weight:700}
+    .filters{display:flex;gap:8px;align-items:center}
+    select,input[type="date"],input[type="text"]{padding:8px;border-radius:8px;border:1px solid #e6e9ef;background:#fff}
+    button{padding:9px 12px;border-radius:8px;border:0;background:var(--accent);color:white;cursor:pointer}
+    button.ghost{background:#fff;border:1px solid #e6e9ef;color:var(--accent)}
+    main{display:grid;grid-template-columns:1fr;gap:12px}
+    .panel{background:var(--card);border-radius:var(--radius);padding:14px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{padding:8px;border-bottom:1px solid #eef2f7;text-align:left}
+    th{background:#fbfcfd;position:sticky;top:0;z-index:1}
+    .small{font-size:12px;color:var(--muted)}
+    .top-actions{display:flex;gap:8px;align-items:center}
+    .charts{display:flex;gap:12px;flex-wrap:wrap}
+    .chart-card{flex:1;min-width:300px;background:var(--card);padding:12px;border-radius:10px}
+    .col-toggle{display:flex;gap:6px;flex-wrap:wrap}
+    footer{margin-top:18px;text-align:center;color:var(--muted);font-size:12px}
+    .empty{padding:40px;text-align:center;color:var(--muted)}
+    .pagination{display:flex;gap:6px;align-items:center}
+    .page-btn{padding:6px 8px;border-radius:6px;border:1px solid #e6e9ef;background:#fff;cursor:pointer}
+    .csv-btn{background:#047857}
+    @media (max-width:900px){
+      .card-row{flex-direction:column}
+      .charts{flex-direction:column}
+    }
   </style>
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body class="dark">
-
-  <div class="container mx-auto p-4 sm:p-6 lg:p-8">
-    <header class="text-center mb-6">
-      <h1 class="text-4xl font-bold">Meeting Analysis Dashboard</h1>
-      <p class="text-gray-400 mt-2">AI-Powered Business Intelligence for Sales Performance</p>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Meeting Analysis Dashboard</h1>
+        <div class="small">Live view of meeting analysis — auto-updates when `dashboard_data.json` is refreshed</div>
+      </div>
+      <div class="controls top-actions">
+        <div class="small">Search</div>
+        <input id="globalSearch" type="text" placeholder="Search POC / Society / Owner / Keywords" />
+        <div class="small">Manager</div>
+        <select id="filterManager"><option value="">All</option></select>
+        <div class="small">Team</div>
+        <select id="filterTeam"><option value="">All</option></select>
+        <div class="small">From</div>
+        <input id="dateFrom" type="date" />
+        <div class="small">To</div>
+        <input id="dateTo" type="date" />
+        <button id="applyFilters" title="Apply filters">Apply</button>
+        <button id="resetFilters" class="ghost" title="Reset filters">Reset</button>
+      </div>
     </header>
 
-    <!-- Filters -->
-    <section class="card-style mb-8">
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div>
-          <label class="block font-semibold mb-1">From Date</label>
-          <input type="date" id="fromDate" class="p-2 border rounded w-full"/>
-        </div>
-        <div>
-          <label class="block font-semibold mb-1">To Date</label>
-          <input type="date" id="toDate" class="p-2 border rounded w-full"/>
-        </div>
-        <div>
-          <label class="block font-semibold mb-1">Team</label>
-          <select id="teamFilter" class="p-2 border rounded w-full">
-            <option value="">All Teams</option>
-          </select>
+    <section class="card-row" id="kpis">
+      <div class="card">
+        <h3>Total meetings (shown)</h3>
+        <p id="kpiMeetings">—</p>
+      </div>
+      <div class="card">
+        <h3>Avg % Score</h3>
+        <p id="kpiAvgScore">—</p>
+      </div>
+      <div class="card">
+        <h3>Total Pipeline</h3>
+        <p id="kpiPipeline">—</p>
+      </div>
+      <div class="card">
+        <h3>Export / Controls</h3>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button id="exportCsv" class="csv-btn">Export CSV</button>
+          <button id="refreshBtn" class="ghost">Refresh</button>
+          <button id="toggleColumns" class="ghost">Columns</button>
         </div>
       </div>
     </section>
 
-    <!-- Tabs -->
-    <nav class="flex justify-center gap-3 flex-wrap mb-8">
-      <button class="tab-button active" data-tab="executive-summary">📈 Executive Summary</button>
-      <button class="tab-button" data-tab="team-performance">🏆 Team Performance</button>
-      <button class="tab-button" data-tab="individual-deep-dive">🚀 Individual Deep Dive</button>
-    </nav>
-
-    <!-- Main Tabs Content -->
     <main>
-      <div id="executive-summary" class="tab-content active"></div>
-      <div id="team-performance" class="tab-content">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div class="card-style"><canvas id="teamMeetingsChart"></canvas></div>
-          <div class="card-style"><canvas id="teamScoreChart"></canvas></div>
+      <div class="panel charts" id="chartsRow">
+        <div class="chart-card">
+          <canvas id="chartAvgByManager" height="180"></canvas>
+        </div>
+        <div class="chart-card">
+          <canvas id="chartMeetingsByTeam" height="180"></canvas>
+        </div>
+        <div class="chart-card">
+          <canvas id="chartPipelineShare" height="180"></canvas>
         </div>
       </div>
-      <div id="individual-deep-dive" class="tab-content">
-        <div class="card-style mb-6">
-          <label for="memberSelect" class="block mb-2 font-semibold">Select Team Member:</label>
-          <select id="memberSelect" class="p-2 border rounded w-full"></select>
+
+      <div class="panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div><strong>Analysis Results</strong> <span class="small">({{count}} rows)</span></div>
+          <div class="col-toggle" id="colToggleContainer"></div>
         </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div class="card-style"><canvas id="memberTrendChart"></canvas></div>
-          <div class="card-style"><canvas id="memberRadarChart"></canvas></div>
+
+        <div id="tableContainer">
+          <table id="dataTable">
+            <thead id="tableHead"></thead>
+            <tbody id="tableBody"></tbody>
+          </table>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+          <div class="pagination" id="pagination"></div>
+          <div class="small">Page size:
+            <select id="pageSize">
+              <option>10</option><option>25</option><option>50</option>
+            </select>
+          </div>
         </div>
       </div>
     </main>
 
-    <footer class="text-center py-8 mt-10">
-      <button id="download-report-btn" class="bg-sky-500 hover:bg-sky-600 text-white font-bold py-3 px-8 rounded-lg">📥 Download Excel</button>
+    <footer>
+      <div class="small">This dashboard reads <code>dashboard_data.json</code> in the same directory. If your data is missing, run the analysis script to regenerate it.</div>
     </footer>
   </div>
 
-  <script>
-    const GOOGLE_SHEET_ID = "YOUR_SHEET_ID";
-    const GOOGLE_API_KEY = "YOUR_API_KEY";
+<script>
+/*
+  Dashboard script
+  - Expects dashboard_data.json (array of objects) with keys matching headers.
+  - If file not found or empty, shows friendly message.
+*/
 
-    let allMeetingData = [];
-    let filteredData = [];
-    let teamMeetingsChart, teamScoreChart, memberTrendChart, memberRadarChart;
+const DEFAULT_COLUMNS = [
+  "Date","POC Name","Society Name","Visit Type","Meeting Type","Amount Value","Months","Deal Status",
+  "Vendor Leads","Society Leads","Opening Pitch Score","Product Pitch Score","Cross-Sell / Opportunity Handling",
+  "Closing Effectiveness","Negotiation Strength","Rebuttal Handling","Overall Sentiment","Total Score","% Score",
+  "Risks / Unresolved Issues","Improvements Needed","Owner (Who handled the meeting)","Email Id","Kibana ID",
+  "Manager","Product Pitch","Team","Media Link","Doc Link","Suggestions & Missed Topics","Pre-meeting brief",
+  "Meeting duration (min)","Rapport Building","Improvement Areas","Product Knowledge Displayed","Call Effectiveness and Control",
+  "Next Step Clarity and Commitment","Missed Opportunities","Key Discussion Points","Key Questions","Competition Discussion",
+  "Action items","Positive Factors","Negative Factors","Customer Needs","Overall Client Sentiment","Feature Checklist Coverage","Manager Email"
+];
 
-    // Fetch Data
-    async function fetchData() {
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${GOOGLE_SHEET_ID}/values/Analysis%20Results!A:ZZ?key=${GOOGLE_API_KEY}`;
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error("Sheet fetch failed");
-      const json = await resp.json();
-      const rows = json.values;
-      const headers = rows[0];
-      return rows.slice(1).map(r => {
-        const obj = {};
-        headers.forEach((h,i) => obj[h] = r[i] || "");
-        return obj;
-      });
+let rawData = [];
+let filteredData = [];
+let visibleColumns = new Set(DEFAULT_COLUMNS);
+let currentPage = 1;
+let pageSize = parseInt(document.getElementById('pageSize').value || "10");
+let managers = new Set();
+let teams = new Set();
+
+function parseNumber(s){
+  if (s === null || s === undefined) return 0;
+  if (typeof s === 'number') return s;
+  try {
+    // remove currency symbols and commas
+    return parseFloat(String(s).replace(/[₹,]/g,'').trim()) || 0;
+  } catch(e){ return 0; }
+}
+
+function safeText(v){ if (v === null || v === undefined || v === '') return 'N/A'; return String(v); }
+
+async function loadData(){
+  try {
+    const res = await fetch('dashboard_data.json', {cache:'no-store'});
+    if (!res.ok) throw new Error('dashboard_data.json not found');
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) {
+      showEmpty("No records found in dashboard_data.json");
+      return;
     }
+    rawData = data.map(r => normalizeRecord(r));
+    populateFilters(rawData);
+    applyAllFilters();
+  } catch (err) {
+    console.error(err);
+    showEmpty("Could not load dashboard_data.json — make sure it is present and valid JSON.");
+  }
+}
 
-    // Apply Filters
-    function applyFilters() {
-      const fromDate = document.getElementById("fromDate").value ? new Date(document.getElementById("fromDate").value) : null;
-      const toDate = document.getElementById("toDate").value ? new Date(document.getElementById("toDate").value) : null;
-      const team = document.getElementById("teamFilter").value;
-
-      filteredData = allMeetingData.filter(m => {
-        const date = new Date(m["Date"] || Date.now());
-        if (fromDate && date < fromDate) return false;
-        if (toDate && date > toDate) return false;
-        if (team && m["Team"] !== team) return false;
-        return true;
-      });
-
-      renderDashboard();
+function normalizeRecord(r){
+  const out = {};
+  DEFAULT_COLUMNS.forEach(col => {
+    // support keys that may miss exact capitalization: check exact or lowercased
+    if (r.hasOwnProperty(col)) out[col] = r[col];
+    else {
+      // try case-insensitive match
+      const key = Object.keys(r).find(k => k.toLowerCase() === col.toLowerCase());
+      out[col] = key ? r[key] : (r[col] ?? r[key] ?? "");
     }
+  });
+  return out;
+}
 
-    // Executive Summary
-    function initializeExecutiveSummary() {
-      const totalMeetings = filteredData.length;
-      const totalValue = filteredData.reduce((s,m) => s + (parseFloat(m["Amount Value"])||0), 0);
+function showEmpty(msg){
+  const container = document.getElementById('tableContainer');
+  container.innerHTML = `<div class="empty">${msg}</div>`;
+  // hide charts and KPIs
+  document.getElementById('chartsRow').style.display = 'none';
+  document.getElementById('kpiMeetings').textContent = '—';
+  document.getElementById('kpiAvgScore').textContent = '—';
+  document.getElementById('kpiPipeline').textContent = '—';
+}
 
-      document.getElementById("executive-summary").innerHTML = `
-        <div class="grid grid-cols-2 gap-6">
-          <div class="card-style text-center"><h3>Total Meetings</h3><p class="text-3xl">${totalMeetings}</p></div>
-          <div class="card-style text-center"><h3>Total Pipeline</h3><p class="text-3xl">₹${totalValue.toLocaleString()}</p></div>
-        </div>
-      `;
+function populateFilters(data){
+  managers.clear(); teams.clear();
+  data.forEach(r=>{
+    const m = r["Manager"] || "";
+    const t = r["Team"] || "";
+    if (m) managers.add(m);
+    if (t) teams.add(t);
+  });
+  const msel = document.getElementById('filterManager');
+  const tsel = document.getElementById('filterTeam');
+  // reset
+  msel.innerHTML = '<option value="">All</option>';
+  tsel.innerHTML = '<option value="">All</option>';
+  Array.from(managers).sort().forEach(m=>{
+    const opt = document.createElement('option'); opt.value = m; opt.textContent = m; msel.appendChild(opt);
+  });
+  Array.from(teams).sort().forEach(t=>{
+    const opt = document.createElement('option'); opt.value = t; opt.textContent = t; tsel.appendChild(opt);
+  });
+}
+
+function applyAllFilters(){
+  const search = (document.getElementById('globalSearch').value || '').toLowerCase();
+  const manager = document.getElementById('filterManager').value;
+  const team = document.getElementById('filterTeam').value;
+  const dateFrom = document.getElementById('dateFrom').value;
+  const dateTo = document.getElementById('dateTo').value;
+
+  filteredData = rawData.filter(r=>{
+    if (manager && String(r["Manager"]).trim() !== manager) return false;
+    if (team && String(r["Team"]).trim() !== team) return false;
+    if (dateFrom){
+      const d = parseDate(r["Date"]);
+      if (!d || d < new Date(dateFrom+'T00:00:00')) return false;
     }
-
-    // Team Performance
-    function initializeTeamPerformance() {
-      const teams = {};
-      filteredData.forEach(m => {
-        const team = m["Team"] || "Unknown";
-        const score = parseFloat(m["% Score"]) || 0;
-        if (!teams[team]) teams[team] = { count: 0, scoreSum: 0 };
-        teams[team].count++;
-        teams[team].scoreSum += score;
-      });
-
-      const labels = Object.keys(teams);
-      const meetingCounts = labels.map(t => teams[t].count);
-      const avgScores = labels.map(t => (teams[t].scoreSum / teams[t].count).toFixed(1));
-
-      if (teamMeetingsChart) teamMeetingsChart.destroy();
-      if (teamScoreChart) teamScoreChart.destroy();
-
-      teamMeetingsChart = new Chart(document.getElementById("teamMeetingsChart"), {
-        type: "pie",
-        data: { labels, datasets:[{ data: meetingCounts, backgroundColor:["#0ea5e9","#22c55e","#f97316","#e11d48","#6366f1"] }] }
-      });
-
-      teamScoreChart = new Chart(document.getElementById("teamScoreChart"), {
-        type: "bar",
-        data: { labels, datasets:[{ label:"Avg % Score", data: avgScores, backgroundColor:"#2563eb" }] },
-        options:{ scales:{ y:{ beginAtZero:true, max:100 } } }
-      });
+    if (dateTo){
+      const d = parseDate(r["Date"]);
+      if (!d || d > new Date(dateTo+'T23:59:59')) return false;
     }
-
-    // Individual Deep Dive
-    function initializeMemberSelect() {
-      const members = [...new Set(filteredData.map(m => m["Owner"]).filter(Boolean))];
-      const select = document.getElementById("memberSelect");
-      select.innerHTML = members.map(m => `<option value="${m}">${m}</option>`).join("");
-      select.onchange = () => updateMemberCharts(select.value);
-      if (members.length) updateMemberCharts(members[0]);
+    if (search){
+      const hay = ([
+        r["POC Name"], r["Society Name"], r["Owner (Who handled the meeting)"],
+        r["Key Discussion Points"], r["Suggestions & Missed Topics"], r["Meeting Type"]
+      ].join(' ') || '').toLowerCase();
+      if (!hay.includes(search)) return false;
     }
+    return true;
+  });
 
-    function updateMemberCharts(member) {
-      const memberData = filteredData.filter(m => m["Owner"] === member);
-      const dates = memberData.map(m => new Date(m["Date"] || Date.now()));
-      const scores = memberData.map(m => parseFloat(m["% Score"])||0);
+  currentPage = 1;
+  renderAll();
+}
 
-      if (memberTrendChart) memberTrendChart.destroy();
-      if (memberRadarChart) memberRadarChart.destroy();
+function parseDate(d){
+  if (!d) return null;
+  // try common formats: YYYY-MM-DD, M/D/YYYY, D-M-YYYY, etc
+  const tryISO = new Date(d);
+  if (!isNaN(tryISO)) return tryISO;
+  // try dd/mm/yyyy or mm/dd/yyyy
+  const parts = d.split(/[-\/]/).map(p=>p.trim());
+  if (parts.length >= 3){
+    let y=parts[2], m=parts[1], day=parts[0];
+    if (y.length===2) y = '20'+y;
+    const iso = new Date(`${y}-${m.padStart(2,'0')}-${day.padStart(2,'0')}`);
+    if (!isNaN(iso)) return iso;
+  }
+  return null;
+}
 
-      memberTrendChart = new Chart(document.getElementById("memberTrendChart"), {
-        type:"line",
-        data:{ labels:dates, datasets:[{ label:"% Score", data:scores, borderColor:"#38bdf8", fill:false }] },
-        options:{ scales:{ x:{ type:"time", time:{ unit:"day" } }, y:{ beginAtZero:true, max:100 } } }
-      });
+function renderAll(){
+  renderKPIs();
+  renderCharts();
+  renderTable();
+}
 
-      const categories = ["Opening Pitch Score","Product Pitch Score","Cross-Sell / Opportunity Handling","Closing Effectiveness","Negotiation Strength","Rebuttal Handling"];
-      const avgValues = categories.map(c => {
-        const vals = memberData.map(m => parseFloat(m[c])||0);
-        return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : 0;
-      });
+function renderKPIs(){
+  const total = filteredData.length;
+  document.getElementById('kpiMeetings').textContent = total;
+  const avg = filteredData.reduce((acc,r)=>acc+parseNumber(r["% Score"]),0) / (total||1);
+  document.getElementById('kpiAvgScore').textContent = total ? avg.toFixed(1)+'%' : '—';
+  const pipeline = filteredData.reduce((acc,r)=>acc+parseNumber(r["Amount Value"]),0);
+  document.getElementById('kpiPipeline').textContent = pipeline ? '₹'+Math.round(pipeline).toLocaleString() : '₹0';
+}
 
-      memberRadarChart = new Chart(document.getElementById("memberRadarChart"), {
-        type:"radar",
-        data:{ labels:categories, datasets:[{ label:"Average Scores", data:avgValues, backgroundColor:"rgba(14,165,233,0.3)", borderColor:"#0ea5e9" }] },
-        options:{ scales:{ r:{ min:0, max:10 } } }
-      });
-    }
+let chartAvgByManager, chartMeetingsByTeam, chartPipelineShare;
+function renderCharts(){
+  // Avg % Score by Manager
+  const byManager = {};
+  filteredData.forEach(r=>{
+    const m = r["Manager"]||'Unassigned';
+    byManager[m] = byManager[m]||{sum:0,count:0};
+    byManager[m].sum += parseNumber(r["% Score"]);
+    byManager[m].count += 1;
+  });
+  const mgrLabels = Object.keys(byManager);
+  const mgrAverages = mgrLabels.map(m => (byManager[m].count? byManager[m].sum/byManager[m].count : 0));
 
-    // Render whole dashboard
-    function renderDashboard() {
-      initializeExecutiveSummary();
-      initializeTeamPerformance();
-      initializeMemberSelect();
-    }
+  // Meetings by Team
+  const byTeam = {};
+  filteredData.forEach(r=>{
+    const t = r["Team"]||'Unassigned';
+    byTeam[t] = (byTeam[t]||0)+1;
+  });
+  const teamLabels = Object.keys(byTeam);
+  const teamCounts = teamLabels.map(t=>byTeam[t]);
 
-    // Excel Export
-    document.getElementById("download-report-btn").addEventListener("click", () => {
-      const ws = XLSX.utils.json_to_sheet(filteredData);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Meetings");
-      XLSX.writeFile(wb, "Meeting_Report.xlsx");
+  // Pipeline share
+  const pipelineByOwner = {};
+  filteredData.forEach(r=>{
+    const o = r["Owner (Who handled the meeting)"]||'Unassigned';
+    pipelineByOwner[o] = (pipelineByOwner[o]||0) + parseNumber(r["Amount Value"]);
+  });
+  const pipelineOwners = Object.keys(pipelineByOwner).filter(k=>pipelineByOwner[k]>0);
+  const pipelineValues = pipelineOwners.map(k=>pipelineByOwner[k]);
+
+  // Create / update Chart.js charts
+  if (chartAvgByManager) chartAvgByManager.destroy();
+  const ctx1 = document.getElementById('chartAvgByManager').getContext('2d');
+  chartAvgByManager = new Chart(ctx1, {
+    type: 'bar',
+    data: {
+      labels: mgrLabels,
+      datasets: [{label:'Avg % Score', data: mgrAverages, backgroundColor:'#0b63d6'}]
+    },
+    options: {responsive:true, maintainAspectRatio:false, scales:{y:{beginAtZero:true}}}
+  });
+
+  if (chartMeetingsByTeam) chartMeetingsByTeam.destroy();
+  const ctx2 = document.getElementById('chartMeetingsByTeam').getContext('2d');
+  chartMeetingsByTeam = new Chart(ctx2, {
+    type:'bar',
+    data:{labels:teamLabels,datasets:[{label:'Meetings',data:teamCounts,backgroundColor:'#059669'}]},
+    options:{responsive:true,maintainAspectRatio:false,scales:{y:{beginAtZero:true}}}
+  });
+
+  if (chartPipelineShare) chartPipelineShare.destroy();
+  const ctx3 = document.getElementById('chartPipelineShare').getContext('2d');
+  chartPipelineShare = new Chart(ctx3, {
+    type:'pie',
+    data:{labels:pipelineOwners,datasets:[{data:pipelineValues,backgroundColor:pipelineOwners.map((_,i)=>`hsl(${(i*60)%360} 70% 50%)`)}]},
+    options:{responsive:true,maintainAspectRatio:false}
+  });
+}
+
+function renderTable(){
+  const head = document.getElementById('tableHead');
+  const body = document.getElementById('tableBody');
+  head.innerHTML = ''; body.innerHTML = '';
+
+  // Build head
+  const trh = document.createElement('tr');
+  Array.from(DEFAULT_COLUMNS).forEach(col=>{
+    if (!visibleColumns.has(col)) return;
+    const th = document.createElement('th');
+    th.textContent = col;
+    trh.appendChild(th);
+  });
+  head.appendChild(trh);
+
+  // Pagination
+  pageSize = parseInt(document.getElementById('pageSize').value || "10");
+  const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
+  if (currentPage > totalPages) currentPage = totalPages;
+
+  const start = (currentPage-1)*pageSize;
+  const pageSlice = filteredData.slice(start, start+pageSize);
+
+  // Rows
+  pageSlice.forEach(r=>{
+    const tr = document.createElement('tr');
+    DEFAULT_COLUMNS.forEach(col=>{
+      if (!visibleColumns.has(col)) return;
+      const td = document.createElement('td');
+      td.innerHTML = formatCell(r[col]);
+      tr.appendChild(td);
     });
+    body.appendChild(tr);
+  });
 
-    // Tabs
-    document.querySelectorAll(".tab-button").forEach(btn => {
-      btn.addEventListener("click", () => {
-        document.querySelectorAll(".tab-button").forEach(b => b.classList.remove("active"));
-        document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
-        btn.classList.add("active");
-        document.getElementById(btn.dataset.tab).classList.add("active");
-      });
-    });
+  // Pagination controls
+  const pag = document.getElementById('pagination');
+  pag.innerHTML = '';
+  const prev = makePageBtn('Prev', ()=>{ if (currentPage>1){currentPage--; renderTable();}});
+  pag.appendChild(prev);
+  for(let p=1;p<=totalPages;p++){
+    const btn = document.createElement('button');
+    btn.className='page-btn';
+    btn.textContent = p;
+    btn.style.fontWeight = p===currentPage?'700':'400';
+    btn.onclick = ()=>{ currentPage = p; renderTable(); };
+    pag.appendChild(btn);
+  }
+  const next = makePageBtn('Next', ()=>{ if (currentPage<totalPages){ currentPage++; renderTable(); }});
+  pag.appendChild(next);
+}
 
-    // Init
-    fetchData().then(data => {
-      allMeetingData = data;
+function makePageBtn(label,fn){
+  const b = document.createElement('button'); b.className='page-btn'; b.textContent=label; b.onclick=fn; return b;
+}
 
-      // Populate team filter
-      const teams = [...new Set(allMeetingData.map(m => m["Team"]).filter(Boolean))];
-      const teamSelect = document.getElementById("teamFilter");
-      teams.forEach(t => teamSelect.innerHTML += `<option value="${t}">${t}</option>`);
+function formatCell(v){
+  if (v === null || v === undefined || v === '') return 'N/A';
+  // if looks like URL
+  try{
+    const s = String(v);
+    if (s.startsWith('http://') || s.startsWith('https://')) {
+      return `<a href="${s}" target="_blank" rel="noopener">${s}</a>`;
+    }
+    return htmlEscape(s);
+  }catch(e){ return 'N/A'; }
+}
 
-      applyFilters();
+function htmlEscape(s){
+  return s.replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});
+}
 
-      document.getElementById("fromDate").addEventListener("change", applyFilters);
-      document.getElementById("toDate").addEventListener("change", applyFilters);
-      document.getElementById("teamFilter").addEventListener("change", applyFilters);
-    }).catch(err => alert("Error: " + err.message));
-  </script>
+// Column toggles
+function setupColumnToggles(){
+  const container = document.getElementById('colToggleContainer');
+  container.innerHTML = '';
+  DEFAULT_COLUMNS.forEach(col=>{
+    const chk = document.createElement('input');
+    chk.type = 'checkbox'; chk.checked = visibleColumns.has(col);
+    chk.id = 'colcb_' + col.replace(/\W/g,'_');
+    chk.onchange = ()=>{ chk.checked ? visibleColumns.add(col) : visibleColumns.delete(col); renderTable(); };
+    const label = document.createElement('label');
+    label.style.fontSize='12px'; label.style.marginRight='6px';
+    label.appendChild(chk);
+    label.appendChild(document.createTextNode(' ' + (col.length>20?col.slice(0,18)+'…':col)));
+    container.appendChild(label);
+  });
+}
+
+// CSV export
+function exportCsv(){
+  if (!filteredData.length) return;
+  const cols = DEFAULT_COLUMNS.filter(c=>visibleColumns.has(c));
+  const rows = [cols.join(',')];
+  filteredData.forEach(r=>{
+    const row = cols.map(c=>{
+      const cell = String(r[c] ?? '').replace(/"/g,'""');
+      return `"${cell}"`;
+    }).join(',');
+    rows.push(row);
+  });
+  const blob = new Blob([rows.join('\n')], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url;
+  a.download = 'dashboard_export.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+// Wire up controls
+document.getElementById('applyFilters').addEventListener('click', applyAllFilters);
+document.getElementById('resetFilters').addEventListener('click', ()=>{
+  document.getElementById('globalSearch').value = '';
+  document.getElementById('filterManager').value = '';
+  document.getElementById('filterTeam').value = '';
+  document.getElementById('dateFrom').value = '';
+  document.getElementById('dateTo').value = '';
+  applyAllFilters();
+});
+document.getElementById('refreshBtn').addEventListener('click', ()=>{ loadData(); });
+document.getElementById('exportCsv').addEventListener('click', exportCsv);
+document.getElementById('pageSize').addEventListener('change', ()=>{ currentPage = 1; renderTable(); });
+
+document.getElementById('globalSearch').addEventListener('keydown', (e)=>{ if (e.key==='Enter') applyAllFilters(); });
+
+// Init
+setupColumnToggles();
+loadData();
+</script>
 </body>
 </html>
