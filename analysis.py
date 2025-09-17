@@ -17,19 +17,18 @@ except Exception:
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-
-# ---------- Default (fallback) prompt if prompt.txt is unavailable ----------
+# ---------- Default prompt fallback ----------
 DEFAULT_PROMPT = """
 ### ROLE
 You are a senior Sales Conversation Analyst for society-management software (ERP + ASP).
 
 ### TASK
-1) Read the transcript and fill **all** fields in the given schema.
-2) If info is missing, use "N/A".
-3) Output **only** valid JSON (no prose, no markdown).
-4) Keep numeric scores as plain numbers in strings (e.g., "7", "83.3%").
+1) Read the transcript and fill **all** fields in the schema below.
+2) If any info is missing, return "N/A".
+3) Output **only** valid JSON (no prose/markdown).
+4) Keep numeric scores as plain numbers inside strings (e.g., "7", "83.3%").
 
-### SCHEMA (keys exactly as below; 47 fields):
+### SCHEMA (exact keys; 47 fields)
 {
 "Date": "", "POC Name": "", "Society Name": "", "Visit Type": "", "Meeting Type": "",
 "Amount Value": "", "Months": "", "Deal Status": "", "Vendor Leads": "", "Society Leads": "",
@@ -46,7 +45,7 @@ You are a senior Sales Conversation Analyst for society-management software (ERP
 "Customer Needs": "", "Overall Client Sentiment": "", "Feature Checklist Coverage": "", "Manager Email": ""
 }
 
-### CONTEXT (Product)
+### CONTEXT
 - ERP: ₹12 + 18% GST / flat / month. Key: Tally import/export, in-house gateway, 350+ bill combos, maker-checker, reminders, e-invoicing, bank rec, inventory, QR assets, PPM, dashboards.
 - ASP: ₹22.5 + 18% GST / flat / month. Key: managed accounting (billing/receipt), bookkeeping, bank rec + suspense follow-up, non-audited reports, finalisation support, audit coordination, vendor/PO/inventory, amenities booking, dedicated remote accountant.
 
@@ -54,20 +53,11 @@ You are a senior Sales Conversation Analyst for society-management software (ERP
 {transcript}
 """
 
-# ---------- Prompt loader ----------
 class _SafeDict(dict):
     def __missing__(self, key):
         return ""
 
 def _load_prompt(config: Dict[str, Any]) -> str:
-    """
-    Load prompt template from (in order of precedence):
-    1) config['analysis']['prompt_path']
-    2) PROMPT_PATH env var
-    3) ./prompt.txt
-    Fallback: DEFAULT_PROMPT
-    Supports placeholders: {transcript}, {owner_name}
-    """
     path = (
         (config.get("analysis", {}) or {}).get("prompt_path")
         or os.environ.get("PROMPT_PATH")
@@ -79,17 +69,14 @@ def _load_prompt(config: Dict[str, Any]) -> str:
                 prompt = f.read()
                 logging.info(f"Loaded prompt template from {path}")
                 return prompt
-        else:
-            logging.warning(f"Prompt file not found at '{path}'. Using built-in default prompt.")
-            return DEFAULT_PROMPT
+        logging.warning(f"Prompt file not found at '{path}'. Using built-in default prompt.")
+        return DEFAULT_PROMPT
     except Exception as e:
         logging.warning(f"Failed to read prompt at '{path}': {e}. Using built-in default prompt.")
         return DEFAULT_PROMPT
 
-
-# ---------- Audio Preprocessing (ffmpeg) ----------
 def _normalize_audio(in_path: str) -> str:
-    """Convert to 16k mono WAV for better accuracy. Requires ffmpeg."""
+    """Convert to 16k mono WAV with ffmpeg for better ASR stability."""
     try:
         base = os.path.basename(in_path)
         safe = re.sub(r"[^\w\-.]+", "_", base)
@@ -101,12 +88,11 @@ def _normalize_audio(in_path: str) -> str:
         logging.info(f"Audio normalized with ffmpeg → {out}")
         return out
     except Exception as e:
-        logging.warning(f"ffmpeg normalization failed: {e}. Using original.")
+        logging.warning(f"ffmpeg normalization failed: {e}. Using original audio.")
         return in_path
 
-
-# ---------- Transcription (faster-whisper) ----------
-def transcribe_audio(file_path: str, config: Dict[str, Any]) -> str:
+def transcribe_audio(file_path: str, config: dict) -> str:
+    """Transcribe with faster-whisper. Keep args minimal for compatibility."""
     model_name = config.get("analysis", {}).get("whisper_model", "small")
     device = config.get("analysis", {}).get("whisper_device", "cpu")
     audio_path = _normalize_audio(file_path)
@@ -114,13 +100,12 @@ def transcribe_audio(file_path: str, config: Dict[str, Any]) -> str:
     try:
         logging.info(f"Loading faster-whisper: {model_name} on {device}")
         model = WhisperModel(model_name, device=device)
-        # Keep arguments minimal for broad compatibility
         segments, _info = model.transcribe(audio_path, beam_size=5)
         text = " ".join([s.text.strip() for s in segments if s.text.strip()])
         logging.info(f"SUCCESS: Transcribed {len(text.split())} words.")
         return text
     except TypeError:
-        # older/newer API fallback
+        # Fallback for versions not supporting beam_size
         try:
             segments, _info = model.transcribe(audio_path)
             text = " ".join([s.text.strip() for s in segments if s.text.strip()])
@@ -133,15 +118,12 @@ def transcribe_audio(file_path: str, config: Dict[str, Any]) -> str:
         logging.error(f"ERROR during transcription: {e}")
         return ""
 
-
-# ---------- Rule-based fallback (no LLM) ----------
 def _rule_based_extract(transcript: str, owner: str) -> Dict[str, str]:
     out = {h: "N/A" for h in sheets.DEFAULT_HEADERS}
     out["Owner (Who handled the meeting)"] = owner or "N/A"
     out["Media Link"] = "N/A"
     out["Doc Link"] = "N/A"
 
-    # quick tries
     emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", transcript)
     if emails:
         out["Email Id"] = emails[0]
@@ -161,7 +143,7 @@ def _rule_based_extract(transcript: str, owner: str) -> Dict[str, str]:
     low = transcript.lower()
     if any(w in low for w in ["happy", "interested", "positive", "good", "great", "excellent"]):
         out["Overall Sentiment"] = "Positive"
-    elif any(w in low for w in ["angry", "upset", "negative", "no", "concern", "issue"]):
+    elif any(w in low for w in ["angry", "upset", "negative", "concern", "issue"]):
         out["Overall Sentiment"] = "Negative"
     else:
         out["Overall Sentiment"] = "Neutral"
@@ -188,13 +170,11 @@ def _rule_based_extract(transcript: str, owner: str) -> Dict[str, str]:
 
     return out
 
-
-# ---------- LLM extraction (Gemini → OpenRouter/OpenAI) ----------
 def _llm_extract(transcript: str, owner_name: str, config: Dict[str, Any]) -> Dict[str, str]:
     template = _load_prompt(config)
     prompt = template.format_map(_SafeDict(transcript=transcript, owner_name=owner_name))
 
-    # Gemini first (if available)
+    # Gemini first
     if genai and os.environ.get("GEMINI_API_KEY"):
         try:
             genai.configure(api_key=os.environ["GEMINI_API_KEY"])
@@ -235,28 +215,17 @@ def _llm_extract(transcript: str, owner_name: str, config: Dict[str, Any]) -> Di
 
     return {}
 
-
 def analyze_transcript(transcript: str, config: Dict[str, Any], owner_name: str) -> Dict[str, str]:
     if not transcript or not transcript.strip():
         return {}
-
-    # Prefer LLM
     data = _llm_extract(transcript, owner_name, config)
     if not data:
         data = _rule_based_extract(transcript, owner_name)
-
-    # Ensure all keys exist and are strings
     clean = {k: (str(data.get(k)) if data.get(k) is not None else "N/A") for k in sheets.DEFAULT_HEADERS}
-    # Overwrite owner with folder owner
     clean["Owner (Who handled the meeting)"] = owner_name or clean.get("Owner (Who handled the meeting)", "N/A")
     return clean
 
-
 def process_single_file(drive_service, gsheets_sheet, file_meta, member_name: str, config: dict):
-    """
-    Orchestrates: download → transcribe → analyze → write sheet → update ledger
-    `gsheets_sheet` must be a gspread Spreadsheet object (not Client).
-    """
     from gdrive import download_file
 
     file_id = file_meta.get("id")
@@ -274,13 +243,13 @@ def process_single_file(drive_service, gsheets_sheet, file_meta, member_name: st
         if not analysis_row:
             raise ValueError("Empty analysis result")
 
-        # Enrich with mapping (Manager/Team/Email) if available
+        # Enrich with mapping (Manager/Team/Email)
         mm = config.get("manager_map", {}).get(member_name, {})
         if mm:
             analysis_row["Manager"] = analysis_row.get("Manager") or mm.get("Manager") or "N/A"
             analysis_row["Team"] = analysis_row.get("Team") or mm.get("Team") or "N/A"
             analysis_row["Manager Email"] = analysis_row.get("Manager Email") or mm.get("Email") or "N/A"
-        # Put media name
+
         analysis_row["Media Link"] = file_name
 
         sheets.write_analysis_result(gsheets_sheet, analysis_row, config)
