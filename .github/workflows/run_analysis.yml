@@ -1,25 +1,26 @@
 name: Run Meeting Analysis
 
 on:
-  workflow_dispatch:    # Manual runs
+  workflow_dispatch:    # manual run
   schedule:
-    - cron: '0 * * * *' # Every hour
+    - cron: '0 * * * *' # every hour at :00 UTC
 
 jobs:
-  run-python-script:
+  run-analysis:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
+      - name: Cache pip
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -31,10 +32,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Execute analysis script
+      - name: Run analysis (main.py)
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}        # ✅ Only Sheets & Drive
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # ✅ For AI analysis
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} # ✅ Failover AI
-          HF_TOKEN: ${{ secrets.HF_TOKEN }} # Optional, for diarization
-        run: python main.py
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional failover
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}                       # optional (diarization)
+        run: |
+          python main.py
