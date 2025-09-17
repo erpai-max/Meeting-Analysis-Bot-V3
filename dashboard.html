@@ -1,138 +1,86 @@
-<!-- dashboard.html -->
 <!doctype html>
-<html lang="en">
+<html>
 <head>
   <meta charset="utf-8" />
   <title>Meeting Insights Dashboard</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background:#f3f4f6; margin:20px; color:#111827; }
-    .card { background:#fff; border-radius:10px; padding:16px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom:16px; }
-    input, select { padding:8px; border-radius:6px; border:1px solid #e5e7eb; }
-    table { width:100%; border-collapse:collapse; font-size:13px; }
-    th, td { padding:8px 10px; border-bottom:1px solid #e6e6e6; text-align:left; vertical-align:top; }
-    th { background:#f9fafb; font-weight:600; position:sticky; top:0; z-index:1; }
-    .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
-    .small { font-size:12px; color:#6b7280; }
-    .download-btn { background:#4f46e5; color:white; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#f6f7fb;}
+    .wrap{max-width:1200px;margin:20px auto;padding:16px;}
+    h1{margin:0 0 12px;}
+    .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;}
+    table{width:100%;border-collapse:collapse;font-size:13px;}
+    th,td{padding:8px 10px;border-bottom:1px solid #eee;}
+    th{position:sticky;top:0;background:#fafafa;}
+    .controls{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+    input,select{padding:8px;border:1px solid #d1d5db;border-radius:8px;}
+    .pill{display:inline-block;padding:4px 8px;background:#eef2ff;border-radius:9999px;margin-right:6px;}
   </style>
 </head>
 <body>
+<div class="wrap">
+  <h1>Meeting Insights Dashboard</h1>
   <div class="card">
-    <h2 style="margin:0 0 8px 0">Meeting Insights Dashboard</h2>
     <div class="controls">
-      <input id="search" placeholder="Search (POC, Society, Owner, Manager...)" style="flex:1;" />
-      <select id="managerFilter"><option value="">All Managers</option></select>
-      <button id="downloadCsv" class="download-btn">Download CSV</button>
+      <input id="search" placeholder="Search (society, owner, manager, etc.)"/>
+      <select id="sent">
+        <option value="">Sentiment</option>
+        <option>Positive</option>
+        <option>Neutral</option>
+        <option>Negative</option>
+        <option>Mixed</option>
+      </select>
     </div>
-    <div id="summary" class="small"></div>
+    <div id="counts"></div>
+    <div style="overflow:auto; max-height:70vh;">
+      <table id="tbl">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
-
-  <div id="tableWrap" class="card" style="overflow:auto; max-height:70vh;">
-    <table id="resultsTable">
-      <thead id="thead"></thead>
-      <tbody id="tbody"></tbody>
-    </table>
-  </div>
-
+</div>
 <script>
-async function loadData() {
-  try {
-    const resp = await fetch('dashboard_data.json');
-    if (!resp.ok) throw new Error('dashboard_data.json not found or not accessible');
-    const data = await resp.json();
-    render(data);
-  } catch (err) {
-    document.getElementById('tableWrap').innerHTML = '<div style="padding:20px;color:#b91c1c;">Error loading dashboard_data.json: ' + err.message + '</div>';
+  const HEADERS = [
+    "Date","POC Name","Society Name","Visit Type","Meeting Type","Amount Value","Months","Deal Status","Vendor Leads","Society Leads",
+    "Opening Pitch Score","Product Pitch Score","Cross-Sell / Opportunity Handling","Closing Effectiveness","Negotiation Strength","Rebuttal Handling",
+    "Overall Sentiment","Total Score","% Score","Risks / Unresolved Issues","Improvements Needed","Owner (Who handled the meeting)","Email Id","Kibana ID",
+    "Manager","Product Pitch","Team","Media Link","Doc Link","Suggestions & Missed Topics","Pre-meeting brief","Meeting duration (min)","Rapport Building",
+    "Improvement Areas","Product Knowledge Displayed","Call Effectiveness and Control","Next Step Clarity and Commitment","Missed Opportunities",
+    "Key Discussion Points","Key Questions","Competition Discussion","Action items","Positive Factors","Negative Factors","Customer Needs",
+    "Overall Client Sentiment","Feature Checklist Coverage","Manager Email"
+  ];
+
+  const thead = document.querySelector("#tbl thead");
+  const tbody = document.querySelector("#tbl tbody");
+  thead.innerHTML = "<tr>" + HEADERS.map(h=>`<th>${h}</th>`).join("") + "</tr>";
+
+  let data = [];
+  fetch("dashboard_data.json")
+    .then(r=>r.json())
+    .then(rows => { data = rows; render(); });
+
+  function render() {
+    const q = (document.getElementById("search").value||"").toLowerCase();
+    const s = document.getElementById("sent").value;
+
+    let rows = data.filter(r=>{
+      const joined = Object.values(r).join(" ").toLowerCase();
+      const qok = !q || joined.includes(q);
+      const sok = !s || r["Overall Sentiment"] === s || r["Overall Client Sentiment"] === s;
+      return qok && sok;
+    });
+
+    document.getElementById("counts").innerHTML =
+      `<span class="pill">Total: ${data.length}</span><span class="pill">Shown: ${rows.length}</span>`;
+
+    tbody.innerHTML = rows.map(r=>{
+      return "<tr>" + HEADERS.map(h=>`<td>${(r[h] ?? "")}</td>`).join("") + "</tr>";
+    }).join("");
   }
-}
 
-function render(data) {
-  if (!Array.isArray(data) || data.length === 0) {
-    document.getElementById('tableWrap').innerHTML = '<div style="padding:20px;">No records found.</div>';
-    return;
-  }
-
-  // Use keys from first record as columns (preserves order if JSON was written orderly)
-  const cols = Object.keys(data[0]);
-  const thead = document.getElementById('thead');
-  thead.innerHTML = '<tr>' + cols.map(c => '<th>' + escapeHtml(c) + '</th>').join('') + '</tr>';
-
-  // populate manager filter
-  const managers = Array.from(new Set(data.map(r => (r.Manager || '').trim()).filter(Boolean))).sort();
-  const managerFilter = document.getElementById('managerFilter');
-  managers.forEach(m => managerFilter.appendChild(new Option(m, m)));
-
-  // caching data for filtering
-  window._dashboardData = data;
-  window._cols = cols;
-  updateTable();
-
-  // summary
-  document.getElementById('summary').textContent = `${data.length} records loaded.`;
-}
-
-function escapeHtml(s) {
-  return (s===null || s===undefined) ? '' : String(s).replace(/[&<>"']/g, function(m){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]; });
-}
-
-function updateTable() {
-  const q = (document.getElementById('search').value || '').toLowerCase();
-  const manager = document.getElementById('managerFilter').value;
-  const data = (window._dashboardData || []).filter(r => {
-    if (manager && (r.Manager || '') !== manager) return false;
-    if (!q) return true;
-    // search in a few important fields
-    return (String(r["Society Name"] || '') + ' ' + String(r["POC Name"] || '') + ' ' + String(r["Owner (Who handled the meeting)"] || '') + ' ' + String(r.Manager || '')).toLowerCase().includes(q);
-  });
-
-  const tbody = document.getElementById('tbody');
-  tbody.innerHTML = '';
-  const cols = window._cols || [];
-  for (const row of data) {
-    const tr = document.createElement('tr');
-    for (const c of cols) {
-      const td = document.createElement('td');
-      td.innerHTML = escapeHtml(row[c] || '');
-      tr.appendChild(td);
-    }
-    tbody.appendChild(tr);
-  }
-}
-
-function toCSV(rows, cols) {
-  const escape = s => '"' + String(s || '').replace(/"/g, '""') + '"';
-  const header = cols.map(escape).join(',');
-  const lines = rows.map(r => cols.map(c => escape(r[c])).join(','));
-  return [header].concat(lines).join('\r\n');
-}
-
-document.getElementById('search').addEventListener('input', updateTable);
-document.getElementById('managerFilter').addEventListener('change', updateTable);
-
-document.getElementById('downloadCsv').addEventListener('click', () => {
-  const cols = window._cols || [];
-  const q = (document.getElementById('search').value || '').toLowerCase();
-  const manager = document.getElementById('managerFilter').value;
-  const rows = (window._dashboardData || []).filter(r => {
-    if (manager && (r.Manager || '') !== manager) return false;
-    if (!q) return true;
-    return (String(r["Society Name"] || '') + ' ' + String(r["POC Name"] || '') + ' ' + String(r["Owner (Who handled the meeting)"] || '') + ' ' + String(r.Manager || '')).toLowerCase().includes(q);
-  });
-  const csv = toCSV(rows, cols);
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'dashboard_data.csv';
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-});
-
-loadData();
+  document.getElementById("search").addEventListener("input", render);
+  document.getElementById("sent").addEventListener("change", render);
 </script>
 </body>
 </html>
