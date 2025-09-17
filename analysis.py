@@ -1,423 +1,301 @@
 import os
-import re
 import json
-import math
+import uuid
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
+
 from faster_whisper import WhisperModel
-import google.generativeai as genai
 
-import sheets  # for DEFAULT_HEADERS reading via Sheet (we only need header names from the sheet itself)
+# Local modules
+import sheets
 
-# -----------------------
-# Helpers: JSON extraction & coercion
-# -----------------------
 
-EXACT_HEADERS = [
-    "Date","POC Name","Society Name","Visit Type","Meeting Type","Amount Value","Months","Deal Status",
-    "Vendor Leads","Society Leads","Opening Pitch Score","Product Pitch Score","Cross-Sell / Opportunity Handling",
-    "Closing Effectiveness","Negotiation Strength","Rebuttal Handling","Overall Sentiment","Total Score","% Score",
-    "Risks / Unresolved Issues","Improvements Needed","Owner (Who handled the meeting)","Email Id","Kibana ID",
-    "Manager","Product Pitch","Team","Media Link","Doc Link","Suggestions & Missed Topics","Pre-meeting brief",
-    "Meeting duration (min)","Rapport Building","Improvement Areas","Product Knowledge Displayed",
-    "Call Effectiveness and Control","Next Step Clarity and Commitment","Missed Opportunities","Key Discussion Points",
-    "Key Questions","Competition Discussion","Action items","Positive Factors","Negative Factors","Customer Needs",
-    "Overall Client Sentiment","Feature Checklist Coverage","Manager Email","File Name","File ID"
-]
-
-# Accept common variants from the LLM and map to exact sheet keys
-ALIAS_MAP = {
-    "owner": "Owner (Who handled the meeting)",
-    "owner_name": "Owner (Who handled the meeting)",
-    "meeting_type": "Meeting Type",
-    "visit_type": "Visit Type",
-    "poc": "POC Name",
-    "poc_name": "POC Name",
-    "society": "Society Name",
-    "society_name": "Society Name",
-    "amount": "Amount Value",
-    "amount_value": "Amount Value",
-    "months_count": "Months",
-    "deal_status": "Deal Status",
-    "vendor_leads": "Vendor Leads",
-    "society_leads": "Society Leads",
-    "opening_pitch_score": "Opening Pitch Score",
-    "product_pitch_score": "Product Pitch Score",
-    "cross_sell": "Cross-Sell / Opportunity Handling",
-    "cross_sell_opportunity_handling": "Cross-Sell / Opportunity Handling",
-    "closing_effectiveness": "Closing Effectiveness",
-    "negotiation_strength": "Negotiation Strength",
-    "rebuttal_handling": "Rebuttal Handling",
-    "overall_sentiment": "Overall Sentiment",
-    "total_score": "Total Score",
-    "percent_score": "% Score",
-    "%score": "% Score",
-    "risks": "Risks / Unresolved Issues",
-    "risks_unresolved_issues": "Risks / Unresolved Issues",
-    "improvements_needed": "Improvements Needed",
-    "email": "Email Id",
-    "email_id": "Email Id",
-    "kibana": "Kibana ID",
-    "kibana_id": "Kibana ID",
-    "manager": "Manager",
-    "product_pitch": "Product Pitch",
-    "team": "Team",
-    "media_link": "Media Link",
-    "doc_link": "Doc Link",
-    "suggestions_missed_topics": "Suggestions & Missed Topics",
-    "premeting_brief": "Pre-meeting brief",
-    "pre_meeting_brief": "Pre-meeting brief",
-    "meeting_duration_min": "Meeting duration (min)",
-    "meeting_duration": "Meeting duration (min)",
-    "rapport_building": "Rapport Building",
-    "improvement_areas": "Improvement Areas",
-    "product_knowledge_displayed": "Product Knowledge Displayed",
-    "call_effectiveness_control": "Call Effectiveness and Control",
-    "next_step_clarity_commitment": "Next Step Clarity and Commitment",
-    "missed_opportunities": "Missed Opportunities",
-    "key_discussion_points": "Key Discussion Points",
-    "key_questions": "Key Questions",
-    "competition_discussion": "Competition Discussion",
-    "action_items": "Action items",
-    "positive_factors": "Positive Factors",
-    "negative_factors": "Negative Factors",
-    "customer_needs": "Customer Needs",
-    "overall_client_sentiment": "Overall Client Sentiment",
-    "feature_checklist_coverage": "Feature Checklist Coverage",
-    "manager_email": "Manager Email",
-    "file_name": "File Name",
-    "file_id": "File ID",
-    "date": "Date"
-}
-
-SCORE_KEYS = [
-    "Opening Pitch Score",
-    "Product Pitch Score",
-    "Cross-Sell / Opportunity Handling",
-    "Closing Effectiveness",
-    "Negotiation Strength",
-]
-
-def _safe_json_from_text(text: str) -> Dict[str, Any]:
+# =======================
+# JSON helpers
+# =======================
+def _extract_json_object(text: str) -> str | None:
     """
-    Extract the first {...} block and parse as JSON.
-    Cleans code fences and trailing commas.
+    Extract the first balanced JSON object from text.
+    Handles code fences and ignores any prose around it.
     """
     if not text:
-        return {}
+        return None
 
-    # Strip code fences if any
     t = text.strip()
     if t.startswith("```"):
-        t = t.strip("`")
+        # Strip triple backticks block
+        t = t.strip("`").strip()
         if t.lower().startswith("json"):
-            t = t[4:].strip()
+            t = t[4:].lstrip()
 
-    # Find first JSON object by brace counting
     start = t.find("{")
     if start == -1:
-        return {}
+        return None
 
     depth = 0
-    end = -1
-    for i, ch in enumerate(t[start:], start=start):
-        if ch == "{":
+    for i in range(start, len(t)):
+        c = t[i]
+        if c == "{":
             depth += 1
-        elif ch == "}":
+        elif c == "}":
             depth -= 1
             if depth == 0:
-                end = i
-                break
-    if end == -1:
-        return {}
+                return t[start : i + 1]
+    return None  # no balanced block found
 
-    candidate = t[start:end+1]
 
-    # Remove trailing commas before closing braces/brackets
-    candidate = re.sub(r",\s*([\]}])", r"\1", candidate)
-
+def _coerce_score(val: str, default_min: int = 2) -> int:
+    """Cast score to int in [1..10], with a minimum default if empty/invalid."""
     try:
-        return json.loads(candidate)
+        n = int(str(val).strip())
     except Exception:
-        # last attempt: replace single quotes with double quotes if it looks like JSON-ish
-        try:
-            candidate2 = candidate.replace("'", '"')
-            return json.loads(candidate2)
-        except Exception:
-            logging.error("Could not parse LLM JSON.")
-            return {}
+        n = default_min
+    if n < default_min:
+        n = default_min
+    if n > 10:
+        n = 10
+    return n
 
-def _coerce_to_exact_headers(data: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Map alias keys to the exact sheet headers and ensure all headers exist.
-    """
-    mapped: Dict[str, str] = {}
-    # Map aliases (case-insensitive)
-    for k, v in (data or {}).items():
-        if k in EXACT_HEADERS:
-            mapped[k] = str(v if v not in (None, "") else "N/A")
-            continue
-        low = k.strip().lower()
-        if low in ALIAS_MAP:
-            mapped[ALIAS_MAP[low]] = str(v if v not in (None, "") else "N/A")
-        else:
-            # try remove spaces/underscores for fuzzy match
-            norm = low.replace(" ", "").replace("_", "")
-            hit = None
-            for ek in EXACT_HEADERS:
-                if norm == ek.lower().replace(" ", "").replace("_", ""):
-                    hit = ek
-                    break
-            if hit:
-                mapped[hit] = str(v if v not in (None, "") else "N/A")
 
-    # Fill missing with N/A
-    for h in EXACT_HEADERS:
-        if h not in mapped:
-            mapped[h] = "N/A"
-    return mapped
+def _compute_totals(row: Dict[str, str]) -> None:
+    """Compute Total Score and % Score from the five component scores."""
+    s1 = _coerce_score(row.get("Opening Pitch Score", ""))
+    s2 = _coerce_score(row.get("Product Pitch Score", ""))
+    s3 = _coerce_score(row.get("Cross-Sell / Opportunity Handling", ""))
+    s4 = _coerce_score(row.get("Closing Effectiveness", ""))
+    s5 = _coerce_score(row.get("Negotiation Strength", ""))
+    total = s1 + s2 + s3 + s4 + s5
+    row["Total Score"] = str(total)
+    row["% Score"] = f"{(total / 50.0) * 100:.2f}%"
 
-def _to_int_or_none(s: str) -> int | None:
-    try:
-        n = int(str(s).strip())
-        return n
-    except Exception:
-        # sometimes "7/10" or "7.0"
-        try:
-            f = float(str(s).strip().replace("%",""))
-            return int(round(f))
-        except Exception:
-            return None
 
-def _compute_totals(mapped: Dict[str, str]) -> None:
-    # compute Total Score and % Score if possible
-    ints = []
-    for k in SCORE_KEYS:
-        val = _to_int_or_none(mapped.get(k, ""))
-        if val is not None:
-            ints.append(max(0, min(10, val)))
-    if len(ints) == 5:
-        total = sum(ints)
-        mapped["Total Score"] = str(total)
-        mapped["% Score"] = f"{(total/50.0)*100:.1f}%"
-    else:
-        # if model provided already, keep it; otherwise N/A
-        if not mapped.get("Total Score") or mapped["Total Score"] == "N/A":
-            mapped["Total Score"] = "N/A"
-        if not mapped.get("% Score") or mapped["% Score"] == "N/A":
-            mapped["% Score"] = "N/A"
-
-DATE_PAT = re.compile(
-    r"(?P<d>\b\d{1,2})[-_/\.](?P<m>\d{1,2})[-_/\.](?P<y>\d{2,4})\b"
-)
-
-def _date_from_filename(file_name: str) -> str:
-    """
-    Extract date like 31-08-25 or 2025_09_04 from file name and return ISO YYYY-MM-DD.
-    """
-    if not file_name:
-        return "N/A"
-    m = DATE_PAT.search(file_name)
-    if not m:
-        return "N/A"
-    d = int(m.group("d"))
-    mo = int(m.group("m"))
-    y = m.group("y")
-    if len(y) == 2:
-        y = "20" + y
-    try:
-        import datetime
-        dt = datetime.date(int(y), mo, d)
-        return dt.isoformat()
-    except Exception:
-        return "N/A"
-
-# -----------------------
+# =======================
 # Transcription
-# -----------------------
-
-def transcribe_audio(file_path: str, config: dict) -> Tuple[str, float]:
+# =======================
+def transcribe_audio(file_path: str, config: dict) -> str:
     """
-    Transcribes audio using Faster-Whisper.
-    Returns (transcript_text, duration_minutes).
+    Transcribes audio using faster-whisper.
+    - Uses VAD noise trimming
+    - If translate_non_english=True, runs task='translate' to English
     """
-    model_size = config["analysis"].get("whisper_model", "small")
-    device = "cpu"
-    logging.info(f"Loading faster-whisper: {model_size} on {device}")
+    model_size = config.get("analysis", {}).get("whisper_model", "small")
+    device = config.get("analysis", {}).get("whisper_device", "cpu")
+    compute_type = config.get("analysis", {}).get("whisper_compute_type", "auto")
+    translate_non_english = config.get("analysis", {}).get("translate_non_english", True)
 
     try:
-        model = WhisperModel(model_size, device=device, compute_type="auto")
-        # Small beam + translate→English for Hindi/Gujarati/etc.
+        logging.info(f"Loading faster-whisper: {model_size} on {device}")
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+
+        # Two-pass: detect language quickly, then run full with chosen task
         segments, info = model.transcribe(
             file_path,
-            task="translate",         # translate non-English → English
-            vad_filter=True,          # trim long silences
-            beam_size=3
+            vad_filter=True,
+            beam_size=3,
+            task="transcribe",  # detect first pass implies task doesn't matter here
         )
-        logging.info("Processing audio with Faster-Whisper (task=translate, beam_size=3)")
-        logging.info(f"Processing audio with duration {info.duration:.3f}s")
+        # If non-English and allowed, use translate on a second run
+        task = "translate" if (translate_non_english and info and info.language and info.language != "en") else "transcribe"
+        if task == "translate":
+            logging.info(f"Detected language '{info.language}' (p≈{getattr(info, 'language_probability', 0):.2f}); re-running with task=translate")
+            segments, info = model.transcribe(
+                file_path,
+                vad_filter=True,
+                beam_size=3,
+                task="translate",
+            )
 
         words = []
-        last_end = 0.0
         for seg in segments:
-            words.append(seg.text.strip())
-            last_end = max(last_end, seg.end)
+            if seg and getattr(seg, "text", ""):
+                words.append(seg.text.strip())
+        transcript = " ".join(words).strip()
 
-        transcript = " ".join(w for w in words if w)
-        duration_min = (last_end or info.duration) / 60.0
-        return transcript.strip(), float(f"{duration_min:.2f}")
+        logging.info(f"SUCCESS: Transcribed {len(transcript.split())} words.")
+        return transcript
     except Exception as e:
         logging.error(f"ERROR during transcription: {e}")
-        return "", 0.0
+        return ""
 
-# -----------------------
-# Prompt Loader
-# -----------------------
 
-def _load_prompt(owner_name: str, transcript: str) -> str:
-    """
-    Loads prompt.txt if present; otherwise uses a strong inline prompt.
-    Injects {owner_name} and {transcript}.
-    """
-    prompt_path = "prompt.txt"
-    base = None
-    if os.path.exists(prompt_path):
-        try:
-            with open(prompt_path, "r", encoding="utf-8") as f:
-                base = f.read()
-        except Exception:
-            base = None
-
-    if not base:
-        # Minimal but strict fallback prompt
-        base = (
-            "You are a sales meeting analyst. Output a single VALID JSON object using exactly these keys "
-            f"in this order:\n{json.dumps(EXACT_HEADERS)}\n"
-            "All values must be strings. Use 'N/A' when not present. Use short bullet lines for lists."
-            "\n\nTRANSCRIPT:\n{transcript}"
-        )
-
-    return base.format(owner_name=owner_name, transcript=transcript)
-
-# -----------------------
+# =======================
 # AI Analysis
-# -----------------------
-
-def _call_gemini(prompt: str, config: dict) -> str:
-    genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-    model_name = config["analysis"].get("gemini_model", "gemini-1.5-flash")
-    model = genai.GenerativeModel(model_name)
-    resp = model.generate_content(prompt)
-    return (resp.text or "").strip()
-
-def _call_openrouter(prompt: str, config: dict) -> str:
-    import openai
-    openai.api_key = os.environ.get("OPENROUTER_API_KEY")
-    model_name = config["analysis"].get("openrouter_model_name", "openrouter/auto")
-    # OpenRouter now uses the Chat Completions v1 compatible API
-    response = openai.ChatCompletion.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-    )
-    return response["choices"][0]["message"]["content"].strip()
-
-def analyze_transcript(transcript: str, owner_name: str, file_name: str, config: dict) -> Dict[str, str]:
+# =======================
+def analyze_transcript(transcript: str, config: dict, owner_name: str = "") -> Dict[str, str]:
     """
-    Calls LLM(s) to analyze transcript and return a normalized dict for the sheet.
-    Robust against formatting variations. Fills derived fields when missing.
+    Calls Gemini (fallback OpenRouter) to analyze transcript and return a dict
+    containing ALL headers from sheets.DEFAULT_HEADERS.
+
+    - Robust JSON extraction (balanced braces)
+    - Saves raw AI output to /tmp if parsing fails
+    - Fills missing fields as "N/A"
+    - Computes Total Score and % Score
     """
-    if not transcript.strip():
-        return {}
+    DEFAULT_HEADERS = sheets.DEFAULT_HEADERS  # single source of truth
 
-    prompt = _load_prompt(owner_name, transcript)
+    # Empty transcript → return fully N/A row but with owner & basic defaults
+    if not transcript or not transcript.strip():
+        row = {h: "N/A" for h in DEFAULT_HEADERS}
+        if owner_name:
+            row["Owner (Who handled the meeting)"] = owner_name
+        if row.get("Overall Sentiment", "N/A") in ("", "N/A"):
+            row["Overall Sentiment"] = "Neutral"
+        _compute_totals(row)
+        return row
 
-    text = ""
-    # Try Gemini then OpenRouter
+    # Build prompt
+    prompt_path = config.get("analysis", {}).get("prompt_path", "prompt.txt")
     try:
-        text = _call_gemini(prompt, config)
-        if not text:
-            raise RuntimeError("Empty Gemini response")
-        logging.info("SUCCESS: LLM response received (Gemini).")
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            base_prompt = f.read()
+    except Exception:
+        base_prompt = (
+            "Return only one JSON object with the required fields. "
+            "If a value is unknown, use 'N/A'."
+        )
+    prompt = base_prompt.format(owner_name=owner_name, transcript=transcript)
+
+    raw_text = ""
+
+    # --- Try Gemini first ---
+    try:
+        import google.generativeai as genai
+
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        if not gemini_key:
+            raise RuntimeError("GEMINI_API_KEY not set")
+
+        genai.configure(api_key=gemini_key)
+        model_name = config.get("analysis", {}).get("gemini_model", "gemini-1.5-flash")
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(prompt)
+        raw_text = (resp.text or "").strip()
     except Exception as e:
         logging.error(f"Gemini failed: {e}")
+
+    # --- Fallback to OpenRouter if Gemini is empty/failed ---
+    if not raw_text:
         try:
-            text = _call_openrouter(prompt, config)
-            logging.info("SUCCESS: LLM response received (OpenRouter).")
+            # Prefer new-style OpenAI client
+            try:
+                from openai import OpenAI
+
+                client = OpenAI(
+                    api_key=os.environ.get("OPENROUTER_API_KEY"),
+                    base_url="https://openrouter.ai/api/v1",
+                )
+                or_model = config.get("analysis", {}).get(
+                    "openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"
+                )
+                resp = client.chat.completions.create(
+                    model=or_model,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw_text = (resp.choices[0].message.content or "").strip()
+            except Exception:
+                # Legacy fallback
+                import openai as openai_legacy
+
+                openai_legacy.api_key = os.environ.get("OPENROUTER_API_KEY")
+                openai_legacy.base_url = "https://openrouter.ai/api/v1"
+                or_model = config.get("analysis", {}).get(
+                    "openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"
+                )
+                resp = openai_legacy.ChatCompletion.create(
+                    model=or_model,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw_text = resp["choices"][0]["message"]["content"].strip()
         except Exception as e2:
             logging.error(f"OpenRouter failed: {e2}")
-            return {}
 
-    data = _safe_json_from_text(text)
-    mapped = _coerce_to_exact_headers(data)
+    # --- Parse JSON; if it fails, save raw and proceed with N/A row ---
+    parsed = None
+    if raw_text:
+        try:
+            snippet = _extract_json_object(raw_text)
+            if snippet:
+                parsed = json.loads(snippet)
+            else:
+                raise ValueError("No balanced JSON object found in AI output.")
+        except Exception as e:
+            fn = f"/tmp/ai_raw_{uuid.uuid4().hex}.txt"
+            try:
+                with open(fn, "w", encoding="utf-8") as f:
+                    f.write(raw_text)
+                logging.warning(f"AI JSON parse failed ({e}). Raw saved to {fn}")
+            except Exception:
+                logging.warning(f"AI JSON parse failed ({e}). Raw could not be saved.")
+            parsed = None
 
-    # Fill derived fields (if still N/A)
-    if mapped.get("Date", "N/A") == "N/A":
-        mapped["Date"] = _date_from_filename(file_name)
+    # --- Normalize to required headers ---
+    row = {h: "N/A" for h in DEFAULT_HEADERS}
+    if isinstance(parsed, dict):
+        for h in DEFAULT_HEADERS:
+            row[h] = str(parsed.get(h, "N/A") or "N/A")
 
-    _compute_totals(mapped)
+    # Ensure owner name present
+    if owner_name and row.get("Owner (Who handled the meeting)", "N/A") in ("", "N/A"):
+        row["Owner (Who handled the meeting)"] = owner_name
 
-    return mapped
+    # Default sentiment if missing
+    if row.get("Overall Sentiment", "N/A") in ("", "N/A"):
+        row["Overall Sentiment"] = "Neutral"
 
-# -----------------------
-# Main File Processor
-# -----------------------
+    # Compute/repair totals
+    _compute_totals(row)
 
-def process_single_file(drive_service, gsheets_client, file_meta, member_name: str, config: dict):
+    return row
+
+
+# =======================
+# Main Single-File Pipeline
+# =======================
+def process_single_file(drive_service, gsheets_client, file_meta: Dict[str, Any], member_name: str, config: dict):
     """
-    download → transcribe → analyze → save to Sheets.
+    Process one file: download → transcribe → analyze → save to Sheets.
+    - Always updates ledger (Processed/Failed), raising on failure so caller can quarantine.
     """
-    from gdrive import download_file, move_file
+    from gdrive import download_file  # local import to avoid cycles
 
     file_id = file_meta["id"]
     file_name = file_meta.get("name", "Unknown")
 
     try:
+        logging.info(f"--- Processing file: {file_name} (ID: {file_id}) ---")
         logging.info(f"Downloading file: {file_name}")
         local_path = download_file(drive_service, file_id, file_name)
 
-        # 1) Transcribe
-        transcript, duration_min = transcribe_audio(local_path, config)
+        # 1) Transcription
+        transcript = transcribe_audio(local_path, config)
 
-        # 2) Analyze
-        analysis_data = analyze_transcript(transcript, member_name, file_name, config)
-        if not analysis_data:
-            raise ValueError("Empty analysis result")
+        # 2) AI Analysis (returns all headers with N/A where missing)
+        analysis_row = analyze_transcript(transcript, config, owner_name=member_name)
 
-        # 3) Inject metadata & manager mapping
-        #    - Manager/Team/Manager Email from config.manager_map
-        mm = config.get("manager_map", {}).get(member_name, {})
-        manager = mm.get("Manager", "N/A")
-        team = mm.get("Team", "N/A")
-        mgr_email = config.get("manager_emails", {}).get(manager, "N/A")
+        # 3) Enrich with known metadata from config
+        #    Try to fill Team/Manager/Manager Email from config if they're still N/A
+        mgr_map = config.get("manager_map", {})
+        if member_name in mgr_map:
+            if analysis_row.get("Team", "N/A") in ("", "N/A"):
+                analysis_row["Team"] = mgr_map[member_name].get("Team", "N/A")
+            if analysis_row.get("Manager", "N/A") in ("", "N/A"):
+                analysis_row["Manager"] = mgr_map[member_name].get("Manager", "N/A")
+            if analysis_row.get("Manager Email", "N/A") in ("", "N/A"):
+                analysis_row["Manager Email"] = mgr_map[member_name].get("Email", "N/A")
 
-        # Duration if missing
-        if analysis_data.get("Meeting duration (min)", "N/A") == "N/A" and duration_min:
-            analysis_data["Meeting duration (min)"] = str(int(round(duration_min)))
+        # 4) Fill Media Link with file name if still empty
+        if analysis_row.get("Media Link", "N/A") in ("", "N/A"):
+            analysis_row["Media Link"] = file_name
 
-        analysis_data["Owner (Who handled the meeting)"] = member_name or "N/A"
-        analysis_data["Manager"] = analysis_data.get("Manager", "N/A") if analysis_data.get("Manager", "N/A") != "N/A" else manager
-        analysis_data["Team"] = analysis_data.get("Team", "N/A") if analysis_data.get("Team", "N/A") != "N/A" else team
-        analysis_data["Manager Email"] = analysis_data.get("Manager Email", "N/A") if analysis_data.get("Manager Email", "N/A") != "N/A" else mgr_email
-        analysis_data["Media Link"] = analysis_data.get("Media Link", "N/A") if analysis_data.get("Media Link", "N/A") != "N/A" else file_name
-        analysis_data["File Name"] = file_name
-        analysis_data["File ID"] = file_id
+        # 5) Write to Google Sheets
+        sheets.write_analysis_result(gsheets_client, analysis_row, config)
 
-        # 4) Write to Google Sheets
-        sheets.write_analysis_result(gsheets_client, analysis_data, config)
-
-        # 5) Ledger
+        # 6) Ledger success
         sheets.update_ledger(gsheets_client, file_id, "Processed", "", config, file_name)
 
         logging.info(f"SUCCESS: Completed processing of {file_name}")
     except Exception as e:
         logging.error(f"ERROR processing {file_name}: {e}")
-        # Quarantine
-        try:
-            from gdrive import quarantine_file
-            quarantine_file(drive_service, file_id, file_meta.get("parents", [""])[0], str(e), config)
-        except Exception as qe:
-            logging.warning(f"Could not quarantine file {file_id}: {qe}")
-        # Ledger
+        # Ledger failure (main will handle quarantine move)
         sheets.update_ledger(gsheets_client, file_id, "Failed", str(e), config, file_name)
         raise
