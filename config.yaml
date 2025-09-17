@@ -3,56 +3,187 @@
 # ===================================================================
 
 # -------------------
-# Google Drive
+# Google Drive Folder IDs
 # -------------------
 google_drive:
-  parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"       # Main parent folder
-  processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"    # Folder for processed files
-  quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"   # Folder for quarantined files
+  parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
+  processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
+  quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
 
 # -------------------
-# Google Sheets
+# Google Sheets Configuration
 # -------------------
 google_sheets:
-  sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"   # Master sheet ID
-  results_tab_name: "Analysis Results"                       # Where AI analysis goes
-  ledger_tab_name: "Ledger"                                  # Ledger for file statuses
+  sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
+  results_tab_name: "Analysis Results"
+  ledger_tab_name: "Processed Ledger"
 
 # -------------------
-# AI Analysis
+# Optional: BigQuery Configuration (disabled by default)
+# -------------------
+use_bigquery: false   # set to true if you want BigQuery streaming/inserts enabled
+google_bigquery:
+  project_id: "meeting-analysis-bot"
+  dataset_id: "meeting_analysis"
+  table_id: "analysis_results"
+  # If use_bigquery is false the BigQuery code paths will be skipped.
+
+# -------------------
+# Team and Manager Mapping
+# -------------------
+manager_map:
+  Sripal:
+    Manager: "Saleem"
+    Team: "Chennai"
+    Email: "sripal.r@nobroker.in"
+  Sharath:
+    Manager: "Saleem"
+    Team: "Bangalore"
+    Email: "sharath.k@nobroker.in"
+  Tavish:
+    Manager: "Saleem"
+    Team: "Bangalore"
+    Email: "tavish.thammaiah@nobroker.in"
+  Aditya:
+    Manager: "Dipesh"
+    Team: "Pune"
+    Email: "aditya.singh2@nobroker.in"
+  Akshay:
+    Manager: "Dipesh"
+    Team: "Pune"
+    Email: "akshay.anil@nobroker.in"
+  Rahul:
+    Manager: "Dipesh"
+    Team: "Pune"
+    Email: "rahul.s@nobroker.in"
+  Hemanth:
+    Manager: "Saleem"
+    Team: "Hyderabad"
+    Email: "jinukala.hemanth@nobroker.in"
+  "Mohmed luqman":
+    Manager: "Saleem"
+    Team: "Hyderabad"
+    Email: "mohmed.luqman@nobroker.in"
+  Pramod:
+    Manager: "Saleem"
+    Team: "Hyderabad"
+    Email: "pramod.ambadas@nobroker.in"
+  Vishal:
+    Manager: "Dipesh"
+    Team: "Navi Mumbai"
+    Email: "vishal.shinde1@nobroker.in"
+  Darshan:
+    Manager: "Dipesh"
+    Team: "Greater Mumbai"
+    Email: "darshan.soni@nobroker.in"
+  Mustafa:
+    Manager: "Dipesh"
+    Team: "Emerging City"
+    Email: "mustafa.hatimbhai@nobroker.in"
+  Yash:
+    Manager: "Dipesh"
+    Team: "Greater Mumbai"
+    Email: "yash.anand@nobroker.in"
+  Sourav:
+    Manager: "Dipesh"
+    Team: "Emerging City"
+    Email: "sourav.chhangani@nobroker.in"
+  Saleem:
+    Manager: "Pratik"
+    Team: "Management"
+    Email: "saleem.hk@nobroker.in"
+  Dipesh:
+    Manager: "Pratik"
+    Team: "Management"
+    Email: "dipesh.karale@nobroker.in"
+
+manager_emails:
+  Saleem: "saleem.hk@nobroker.in"
+  Dipesh: "dipesh.karale@nobroker.in"
+  Pratik: "pratik.ray@nobroker.in"
+
+# -------------------
+# Headers for Sheets (keeps order required by your sheets module)
+# -------------------
+sheets_headers:
+  - "Date"
+  - "POC Name"
+  - "Society Name"
+  - "Visit Type"
+  - "Meeting Type"
+  - "Amount Value"
+  - "Months"
+  - "Deal Status"
+  - "Vendor Leads"
+  - "Society Leads"
+  - "Opening Pitch Score"
+  - "Product Pitch Score"
+  - "Cross-Sell / Opportunity Handling"
+  - "Closing Effectiveness"
+  - "Negotiation Strength"
+  - "Rebuttal Handling"
+  - "Overall Sentiment"
+  - "Total Score"
+  - "% Score"
+  - "Risks / Unresolved Issues"
+  - "Improvements Needed"
+  - "Owner (Who handled the meeting)"
+  - "Email Id"
+  - "Kibana ID"
+  - "Manager"
+  - "Product Pitch"
+  - "Team"
+  - "Media Link"
+  - "Doc Link"
+  - "Suggestions & Missed Topics"
+  - "Pre-meeting brief"
+  - "Meeting duration (min)"
+  - "Rapport Building"
+  - "Improvement Areas"
+  - "Product Knowledge Displayed"
+  - "Call Effectiveness and Control"
+  - "Next Step Clarity and Commitment"
+  - "Missed Opportunities"
+  - "Key Discussion Points"
+  - "Key Questions"
+  - "Competition Discussion"
+  - "Action items"
+  - "Positive Factors"
+  - "Negative Factors"
+  - "Customer Needs"
+  - "Overall Client Sentiment"
+  - "Feature Checklist Coverage"
+  - "Manager Email"
+
+# -------------------
+# Analysis Settings
 # -------------------
 analysis:
-  whisper_model: "small.en"                  # Faster-Whisper model for transcription
-  gemini_model: "gemini-1.5-flash"           # Gemini for primary analysis
-  openrouter_model_name: "gpt-4o-mini"       # OpenRouter fallback model
+  redact_pii: true
+  enable_diarization: false
+  whisper_model: "tiny.en"               # faster-whisper model name; change to "base.en" etc if desired
+  gemini_model: "gemini-1.5-flash"       # primary LLM (Gemini)
+  openrouter_model_name: "nousresearch/nous-hermes-2-mistral-7b-dpo"  # fallback model for OpenRouter/OpenAI
+  # If you want to force OpenRouter/OpenAI instead of Gemini, set use_gemini: false
+  use_gemini: true
 
 # -------------------
-# Weekly Digest (Email)
+# Weekly Digest Settings
 # -------------------
 weekly_digest:
   enabled: true
-  day_of_week: "Monday"                      # When digest runs
-  send_time: "09:30"                         # 9:30 AM IST
+  send_email: true    # set false to only generate previews (no SMTP send)
 
 # -------------------
-# Manager Emails
+# Operational flags / tuning
 # -------------------
-manager_emails:
-  Saleem: "saleem@nobroker.in"
-  Sharath: "sharath@nobroker.in"
-  Tavish: "tavish@nobroker.in"
-  Sripal: "sripal@nobroker.in"
-  Musthafa: "musthafa@nobroker.in"
-  Darshan: "darshan@nobroker.in"
-  Hemanth: "hemanth@nobroker.in"
-  Rahul: "rahul@nobroker.in"
-  Akshay: "akshay@nobroker.in"
-  Mohmed Luqman: "luqman@nobroker.in"
-  Vishal: "vishal@nobroker.in"
-  Dipesh: "dipesh@nobroker.in"
+runtime:
+  temp_dir: "/tmp"    # where downloaded media files are saved
+  max_workers: 2      # if you later add parallelism, control concurrency here
 
 # -------------------
-# Misc
-# -------------------
-logging:
-  level: "INFO"
+# Notes:
+# - Secrets (GCP_SA_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MAIL_USERNAME, MAIL_PASSWORD) must be set
+#   as environment variables (or GitHub Actions secrets). Do NOT put them in this YAML.
+# - If you don't want BigQuery streaming (and don't have paid account), keep use_bigquery: false.
+# - Keep headers quoted where they contain special characters (e.g. "% Score").
