@@ -12,6 +12,7 @@ google_sheets:
   results_tab_name: "Analysis Results"
   ledger_tab_name: "Processed Ledger"
 
+# Maps team member folder name → default Manager/Team/Email
 manager_map:
   Sripal: { Manager: "Saleem", Team: "Chennai", Email: "sripal.r@nobroker.in" }
   Sharath: { Manager: "Saleem", Team: "Bangalore", Email: "sharath.k@nobroker.in" }
@@ -24,7 +25,7 @@ manager_map:
   Pramod: { Manager: "Saleem", Team: "Hyderabad", Email: "pramod.ambadas@nobroker.in" }
   Vishal: { Manager: "Dipesh", Team: "Navi Mumbai", Email: "vishal.shinde1@nobroker.in" }
   Darshan: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "darshan.soni@nobroker.in" }
-  Mustafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
+  Musthafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
   Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
@@ -35,62 +36,12 @@ manager_emails:
   Dipesh: "dipesh.karale@nobroker.in"
   Pratik: "pratik.ray@nobroker.in"
 
-sheets_headers:
-  - "Date"
-  - "POC Name"
-  - "Society Name"
-  - "Visit Type"
-  - "Meeting Type"
-  - "Amount Value"
-  - "Months"
-  - "Deal Status"
-  - "Vendor Leads"
-  - "Society Leads"
-  - "Opening Pitch Score"
-  - "Product Pitch Score"
-  - "Cross-Sell / Opportunity Handling"
-  - "Closing Effectiveness"
-  - "Negotiation Strength"
-  - "Rebuttal Handling"
-  - "Overall Sentiment"
-  - "Total Score"
-  - "% Score"
-  - "Risks / Unresolved Issues"
-  - "Improvements Needed"
-  - "Owner (Who handled the meeting)"
-  - "Email Id"
-  - "Kibana ID"
-  - "Manager"
-  - "Product Pitch"
-  - "Team"
-  - "Media Link"
-  - "Doc Link"
-  - "Suggestions & Missed Topics"
-  - "Pre-meeting brief"
-  - "Meeting duration (min)"
-  - "Rapport Building"
-  - "Improvement Areas"
-  - "Product Knowledge Displayed"
-  - "Call Effectiveness and Control"
-  - "Next Step Clarity and Commitment"
-  - "Missed Opportunities"
-  - "Key Discussion Points"
-  - "Key Questions"
-  - "Competition Discussion"
-  - "Action items"
-  - "Positive Factors"
-  - "Negative Factors"
-  - "Customer Needs"
-  - "Overall Client Sentiment"
-  - "Feature Checklist Coverage"
-  - "Manager Email"
-
 analysis:
-  redact_pii: true
-  enable_diarization: false
-  whisper_model: "tiny.en"
+  prompt_path: "prompt.txt"        # external prompt (optional)
+  whisper_model: "small"           # or "base", "tiny.en", etc.
+  whisper_device: "cpu"            # cpu / cuda
   gemini_model: "gemini-1.5-flash"
-  openrouter_model_name: "nousresearch/nous-hermes-2-mistral-7b-dpo"
+  openrouter_model_name: "gpt-4o-mini"
 
 weekly_digest:
   enabled: true
