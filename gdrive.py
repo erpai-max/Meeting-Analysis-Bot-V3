@@ -1,145 +1,182 @@
-import io
+# gdrive.py
 import os
+import io
 import logging
-import time
-from googleapiclient.discovery import build
+import re
+import tempfile
 from googleapiclient.http import MediaIoBaseDownload
-from google.oauth2 import service_account
 
-import analysis
+# sanitize filename to safe local name
+def _safe_filename(name: str) -> str:
+    if not name:
+        return None
+    # replace slashes and multiple spaces, keep extension if present
+    name = name.strip()
+    name = name.replace("/", "_").replace("\\", "_")
+    name = re.sub(r"[^\w\-\.\s]", "_", name)
+    name = re.sub(r"\s+", "_", name)
+    return name
 
-# =======================
-# Google Drive Auth
-# =======================
-def authenticate_gdrive(config):
-    """Authenticate with Google Drive API using service account key."""
-    try:
-        gcp_key_str = os.environ.get("GCP_SA_KEY")
-        if not gcp_key_str:
-            raise ValueError("Missing GCP_SA_KEY environment variable")
-
-        creds_info = service_account.Credentials.from_service_account_info(
-            eval(gcp_key_str),  # stringified JSON from secrets
-            scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        service = build("drive", "v3", credentials=creds_info)
-        logging.info("SUCCESS: Authenticated Google Drive")
-        return service
-    except Exception as e:
-        logging.error(f"CRITICAL: Could not authenticate Google Drive: {e}")
-        raise
-
-# =======================
-# File Download
-# =======================
-def download_file(service, file_id: str, file_name: str) -> str:
-    """Download a file from Google Drive and return local path."""
-    local_path = f"/tmp/{file_name.replace(' ', '_')}"
+# -----------------------
+# Download File
+# -----------------------
+def download_file(service, file_id: str, file_name: str = None) -> str:
+    """
+    Download a file from Google Drive by file_id.
+    Returns local path (in temp dir). Raises exception on failure.
+    """
     try:
         request = service.files().get_media(fileId=file_id)
+        safe_name = _safe_filename(file_name) if file_name else file_id
+        # ensure extension if missing: try to fetch mimeType and map common types
+        if not safe_name or "." not in safe_name:
+            # attempt to get the file metadata for name/mimeType
+            try:
+                meta = service.files().get(fileId=file_id, fields="name, mimeType").execute()
+                meta_name = meta.get("name")
+                if meta_name:
+                    safe_name = _safe_filename(meta_name)
+                else:
+                    # fallback with id
+                    safe_name = f"{file_id}"
+            except Exception:
+                safe_name = f"{file_id}"
+
+        local_dir = tempfile.gettempdir()
+        local_path = os.path.join(local_dir, safe_name)
+
+        # open file and stream download
         fh = io.FileIO(local_path, "wb")
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
             status, done = downloader.next_chunk()
-            if status:
-                logging.info(f"Download progress for {file_name}: {int(status.progress() * 100)}%")
+            if status and status.progress() is not None:
+                try:
+                    logging.info(f"Download progress for {safe_name}: {int(status.progress() * 100)}%")
+                except Exception:
+                    # some implementations may not provide progress()
+                    logging.debug("Download progress update unavailable")
+        fh.close()
         logging.info(f"SUCCESS: File download complete: {local_path}")
         return local_path
     except Exception as e:
-        logging.error(f"ERROR downloading file {file_name}: {e}")
+        logging.error(f"ERROR downloading file {file_name or file_id}: {e}")
+        # remove partial file if exists
+        try:
+            if local_path and os.path.exists(local_path):
+                os.remove(local_path)
+        except Exception:
+            pass
         raise
 
-# =======================
+# -----------------------
 # Move File
-# =======================
-def move_file(service, file_id: str, old_folder: str, new_folder: str):
-    """Move file between Drive folders."""
+# -----------------------
+def move_file(service, file_id: str, old_folder_id: str, new_folder_id: str):
+    """
+    Move file from one folder to another.
+    If old_folder_id is None or not present, will attempt to remove all parents and add new parent.
+    """
     try:
-        # Remove from old, add to new
+        # fetch current parents
         file = service.files().get(fileId=file_id, fields="parents").execute()
-        prev_parents = ",".join(file.get("parents", []))
+        prev_parents_list = file.get("parents", []) or []
+        prev_parents = ",".join(prev_parents_list)
+        # If old_folder_id provided, prefer to remove that; otherwise remove all prev parents
+        remove_parents = prev_parents
+        if old_folder_id and old_folder_id in prev_parents_list:
+            remove_parents = old_folder_id
+
         service.files().update(
             fileId=file_id,
-            addParents=new_folder,
-            removeParents=prev_parents,
-            fields="id, parents"
+            addParents=new_folder_id,
+            removeParents=remove_parents,
+            fields="id, parents",
         ).execute()
-        logging.info(f"SUCCESS: File {file_id} moved from {old_folder} → {new_folder}")
+        logging.info(f"SUCCESS: File {file_id} moved to folder {new_folder_id}")
     except Exception as e:
-        logging.error(f"ERROR moving file {file_id}: {e}")
+        logging.error(f"ERROR moving file {file_id} to {new_folder_id}: {e}")
+        raise
 
-# =======================
-# Folder Scan + Processing
-# =======================
-def scan_and_process_all(drive_service, gsheets_client, config):
-    """Scan all team folders and process new files."""
-    logging.info("Starting to check discovered team folders...")
-
-    parent_id = config["google_drive"]["parent_folder_id"]
-
-    # List city/team folders under parent
-    city_folders = drive_service.files().list(
-        q=f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder'",
-        fields="files(id, name)"
-    ).execute().get("files", [])
-
-    for city in city_folders:
-        logging.info(f"Found city folder: {city['name']}")
-        team_folders = drive_service.files().list(
-            q=f"'{city['id']}' in parents and mimeType='application/vnd.google-apps.folder'",
-            fields="files(id, name)"
-        ).execute().get("files", [])
-
-        for team in team_folders:
-            logging.info(f"  - Discovered team member folder: {team['name']} (ID: {team['id']})")
-            process_team_folder(drive_service, gsheets_client, team, config)
-
-# =======================
-# Process Team Folder
-# =======================
-def process_team_folder(drive_service, gsheets_client, team_folder: dict, config: dict):
-    """Check files in one team folder and process each."""
-    folder_id = team_folder["id"]
-    member_name = team_folder["name"]
-
+# -----------------------
+# Discover Team Folders
+# -----------------------
+def discover_team_folders(service, parent_folder_id: str) -> dict:
+    """
+    Discover team member folders under the provided parent folder.
+    Returns dict mapping member_name -> folder_id.
+    """
+    team_folders = {}
     try:
-        files = drive_service.files().list(
-            q=f"'{folder_id}' in parents and trashed=false",
-            fields="files(id, name, mimeType, createdTime)"
-        ).execute().get("files", [])
+        # first-level: cities or categories
+        q = f"'{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        city_folders = service.files().list(q=q, fields="files(id, name)").execute().get("files", [])
+
+        for city in city_folders:
+            logging.info(f"Found city folder: {city.get('name')}")
+            # list member folders inside city
+            mq = f"'{city['id']}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            member_folders = service.files().list(q=mq, fields="files(id, name)").execute().get("files", [])
+            for member in member_folders:
+                name = member.get("name")
+                fid = member.get("id")
+                logging.info(f"  - Discovered team member folder: {name} (ID: {fid})")
+                team_folders[name] = fid
     except Exception as e:
-        logging.error(f"ERROR fetching files for {member_name}: {e}")
-        return
+        logging.error(f"ERROR discovering team folders under {parent_folder_id}: {e}")
+    return team_folders
 
-    media_files = [f for f in files if f["mimeType"].startswith("audio") or f["name"].endswith(".mp3")]
+# -----------------------
+# Get Files To Process
+# -----------------------
+def get_files_to_process(service, folder_id: str, processed_file_ids: list) -> list:
+    """
+    List all unprocessed media files in a given folder.
+    Returns list of file metadata dicts.
+    """
+    try:
+        query = f"'{folder_id}' in parents and trashed=false"
+        files = service.files().list(q=query, fields="files(id, name, mimeType, createdTime, parents)").execute().get("files", [])
 
-    if not media_files:
-        return
+        media_files = []
+        for f in files:
+            mt = f.get("mimeType", "")
+            # some audio files uploaded as generic blobs - include common audio/video mime types
+            if mt.startswith("audio/") or mt.startswith("video/") or mt in (
+                "application/octet-stream", "audio/mpeg", "audio/mp3", "audio/wav"
+            ):
+                media_files.append(f)
 
-    logging.info(f"Found {len(media_files)} new media file(s) for {member_name}.")
+        new_files = [f for f in media_files if f.get("id") not in (processed_file_ids or [])]
+        return new_files
+    except Exception as e:
+        logging.error(f"ERROR getting files to process from folder {folder_id}: {e}")
+        return []
 
-    for f in media_files:
-        file_id, file_name = f["id"], f["name"]
-        logging.info(f"--- Processing file: {file_name} (ID: {file_id}) ---")
+# -----------------------
+# Quarantine File
+# -----------------------
+def quarantine_file(service, file_id: str, current_folder_id: str, error_message: str, config: dict):
+    """
+    Move file to quarantine folder and update its description with the error message.
+    If quarantine folder is missing in config, logs and raises.
+    """
+    try:
+        quarantine_id = config["google_drive"].get("quarantine_folder_id")
+        if not quarantine_id:
+            raise ValueError("quarantine_folder_id not configured in config")
 
+        # Update description with an error note (truncate to safe length)
+        desc = f"Quarantined due to error: {error_message}"
         try:
-            analysis.process_single_file(drive_service, gsheets_client, f, member_name, config)
-
-            # Move to Processed
-            move_file(
-                drive_service,
-                file_id,
-                folder_id,
-                config["google_drive"]["processed_folder_id"]
-            )
+            service.files().update(fileId=file_id, body={"description": desc}).execute()
         except Exception as e:
-            logging.error(f"ERROR processing {file_name}: {e}")
+            logging.warning(f"Could not update file description for {file_id}: {e}")
 
-            # Move to Quarantine
-            move_file(
-                drive_service,
-                file_id,
-                folder_id,
-                config["google_drive"]["quarantine_folder_id"]
-            )
+        # Move file into quarantine folder
+        move_file(service, file_id, current_folder_id, quarantine_id)
+        logging.info(f"SUCCESS: File {file_id} quarantined into {quarantine_id}")
+    except Exception as e:
+        logging.error(f"ERROR quarantining file {file_id}: {e}")
+        # do not re-raise here to avoid double-failure; caller already logs/handles
