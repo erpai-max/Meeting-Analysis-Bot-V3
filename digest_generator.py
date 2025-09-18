@@ -259,8 +259,16 @@ Team Performance (owner, avg_score, pipeline):
 # Email
 # -----------------------
 def send_email(subject: str, html_content: str, recipient: str):
+    """Sends the digest email via SMTP (supports SSL 465 or STARTTLS 587)."""
+    import smtplib, os
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
     sender = os.environ.get("MAIL_USERNAME")
     password = os.environ.get("MAIL_PASSWORD")
+    host = os.environ.get("MAIL_SMTP_HOST", "smtp.gmail.com")
+    port = int(os.environ.get("MAIL_SMTP_PORT", "465"))
+    use_tls = os.environ.get("MAIL_USE_TLS", "false").strip().lower() in ("1", "true", "yes")
 
     if not sender or not password:
         logging.warning("MAIL_USERNAME or MAIL_PASSWORD not set. Printing preview instead.")
@@ -268,6 +276,7 @@ def send_email(subject: str, html_content: str, recipient: str):
         print(f"TO: {recipient}\nSUBJECT: {subject}\n{html_content[:1000]}...\n")
         return
 
+    # Gmail requires the "From" to match the authenticated account unless you've set up 'Send mail as'
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = sender
@@ -275,12 +284,33 @@ def send_email(subject: str, html_content: str, recipient: str):
     msg.attach(MIMEText(html_content, "html"))
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        if use_tls:
+            # STARTTLS (e.g., host=smtp.gmail.com, port=587)
+            server = smtplib.SMTP(host, port)
+            server.ehlo()
+            server.starttls()
             server.login(sender, password)
-            server.sendmail(sender, recipient, msg.as_string())
+        else:
+            # SSL (e.g., host=smtp.gmail.com, port=465)
+            server = smtplib.SMTP_SSL(host, port)
+            server.login(sender, password)
+
+        server.sendmail(sender, [recipient], msg.as_string())
+        server.quit()
         logging.info(f"SUCCESS: Email sent to {recipient}")
+
+    except smtplib.SMTPAuthenticationError as e:
+        code = getattr(e, "smtp_code", None)
+        msg = getattr(e, "smtp_error", b"").decode(errors="ignore")
+        logging.error(
+            f"SMTP auth failed ({code}): {msg}. "
+            "If using Gmail: enable 2-Step Verification and use an App Password, "
+            "make sure MAIL_USERNAME matches the account you created the App Password for, "
+            "and paste the 16-char code without spaces."
+        )
     except Exception as e:
-        logging.error(f"ERROR sending email: {e}")
+        logging.error(f"ERROR sending email via SMTP: {e}")
+
 
 
 # -----------------------
