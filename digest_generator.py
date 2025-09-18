@@ -2,63 +2,181 @@ import os
 import yaml
 import logging
 import json
+import re
 import time
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import gspread
 from google.oauth2 import service_account
+import google.generativeai as genai
 
-import sheets
+# Local modules
 import email_formatter
+import sheets
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+
+# -----------------------
+# Auth
+# -----------------------
 def authenticate_google_sheets(config: Dict):
+    """Authenticate with Google Sheets and return spreadsheet handle."""
     gcp_key_str = os.environ.get("GCP_SA_KEY")
     if not gcp_key_str:
-        raise ValueError("Missing GCP_SA_KEY")
+        raise RuntimeError("Missing GCP_SA_KEY env var")
     creds_info = json.loads(gcp_key_str)
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
     client = gspread.authorize(creds)
-    sheet = client.open_by_key(config["google_sheets"]["sheet_id"])
-    sheets.ensure_tabs_exist(sheet, config)
-    return sheet
+    sheet_id = config["google_sheets"]["sheet_id"]
+    return client.open_by_key(sheet_id)
 
-def fetch_manager_data(sheet, config: Dict, manager_name: str) -> List[Dict]:
+
+# -----------------------
+# Utilities
+# -----------------------
+DATE_PATTERNS = [
+    "%Y-%m-%d",  # 2025-09-04
+    "%d-%m-%Y",  # 04-09-2025
+    "%m-%d-%Y",  # 09-04-2025
+    "%Y/%m/%d",  # 2025/09/04
+    "%d/%m/%Y",  # 04/09/2025
+    "%m/%d/%Y",  # 09/04/2025
+    "%d.%m.%Y",  # 04.09.2025
+    "%b %d, %Y", # Sep 04, 2025
+    "%d %b %Y",  # 04 Sep 2025
+]
+
+def parse_date_flexible(value: str):
+    """Return datetime.date or None."""
+    from datetime import datetime
+    if not value or str(value).strip().upper() in ("", "N/A", "NA", "NONE", "NULL"):
+        return None
+    s = str(value).strip()
+    # Some sheets return like 9/4/2025 00:00:00
+    s = re.sub(r"\s+\d{2}:\d{2}:\d{2}$", "", s)
+    for fmt in DATE_PATTERNS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            continue
+    # Last resort: try to pull yyyy-mm-dd pieces out
+    m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", s)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+        except Exception:
+            pass
+    return None
+
+def norm(s: Any) -> str:
+    return str(s or "").strip()
+
+def icase(s: Any) -> str:
+    return norm(s).casefold()
+
+def num_from_text(s: Any) -> float:
+    """
+    Extract a reasonable float from '₹53,000', '83.3%', 'N/A'.
+    Returns 0.0 if cannot parse.
+    """
+    t = str(s or "")
+    if not t or t.upper() in ("N/A", "NA", "NONE", "NULL"):
+        return 0.0
+    # Keep digits, dot, minus
+    cleaned = re.sub(r"[^\d\.\-]", "", t.replace(",", ""))
     try:
-        ws = sheet.worksheet(config["google_sheets"]["results_tab_name"])
-        records = ws.get_all_records()
-        from datetime import datetime, timedelta
-        cutoff = datetime.now() - timedelta(days=7)
+        return float(cleaned) if cleaned not in ("", ".", "-", "-.") else 0.0
+    except Exception:
+        return 0.0
 
-        manager_records = []
-        for r in records:
-            if str(r.get("Manager", "")).strip() != manager_name:
-                continue
-            try:
-                meeting_date = datetime.strptime(str(r.get("Date", "")), "%Y-%m-%d")
-            except Exception:
-                continue
-            if meeting_date >= cutoff:
-                manager_records.append(r)
-        logging.info(f"Found {len(manager_records)} records for {manager_name}.")
-        return manager_records
-    except Exception as e:
-        logging.error(f"Could not fetch data for manager {manager_name}: {e}")
-        return []
 
+# -----------------------
+# Data fetching
+# -----------------------
+def build_manager_to_owners(config: Dict) -> Dict[str, List[str]]:
+    """
+    Invert config.manager_map (owner -> {Manager, Team, Email})
+    -> manager_to_owners[manager_name] = [owner1, owner2, ...]
+    """
+    mgr_to_owners: Dict[str, List[str]] = {}
+    for owner, meta in (config.get("manager_map") or {}).items():
+        mgr = meta.get("Manager", "")
+        if not mgr:
+            continue
+        mgr_to_owners.setdefault(mgr, []).append(owner)
+    return mgr_to_owners
+
+def fetch_manager_data(gsheets, config: Dict, manager_name: str) -> List[Dict]:
+    """
+    Pull rows for a Manager from Google Sheets:
+    - If row Manager matches (case-insensitive) manager_name OR
+    - If row Owner belongs to that manager via config.manager_map
+    Then apply lookback days filter on Date. If date missing and include_undated: include.
+    """
+    results_tab = config["google_sheets"]["results_tab_name"]
+    ws = gsheets.worksheet(results_tab)
+    records = ws.get_all_records()  # list of dicts
+
+    from datetime import datetime, timedelta
+    lookback_days = int(config.get("weekly_digest", {}).get("lookback_days", 7))
+    include_undated = bool(config.get("weekly_digest", {}).get("include_undated", True))
+    cutoff = (datetime.now() - timedelta(days=lookback_days)).date()
+
+    mgr_to_owners = build_manager_to_owners(config)
+    owners_for_manager = set(mgr_to_owners.get(manager_name, []))
+    mgr_key = manager_name.casefold()
+
+    picked: List[Dict] = []
+    skipped = 0
+
+    for r in records:
+        row_mgr = icase(r.get("Manager"))
+        row_owner = norm(r.get("Owner (Who handled the meeting)"))
+        row_owner_ic = icase(row_owner)
+
+        belongs = False
+        if row_mgr == mgr_key:
+            belongs = True
+        elif row_owner in owners_for_manager or row_owner_ic in {icase(x) for x in owners_for_manager}:
+            belongs = True
+
+        if not belongs:
+            skipped += 1
+            continue
+
+        # Date filter
+        row_date = parse_date_flexible(r.get("Date"))
+        if row_date is None:
+            if include_undated:
+                picked.append(r)
+            else:
+                skipped += 1
+            continue
+
+        if row_date >= cutoff:
+            picked.append(r)
+        else:
+            skipped += 1
+
+    logging.info(f"Found {len(picked)} records for {manager_name}. (Skipped {skipped})")
+    return picked
+
+
+# -----------------------
+# Aggregation
+# -----------------------
 def process_team_data(team_records: List[Dict]) -> (Dict[str, Any], List[Dict], List[Dict]):
+    """Compute KPIs + per-rep aggregates."""
     total_meetings = len(team_records)
-    def fnum(v): 
-        try: return float(str(v).replace(",","").replace("%","").strip() or 0)
-        except: return 0.0
+    total_pipeline = sum(num_from_text(r.get("Amount Value")) for r in team_records)
 
-    total_pipeline = sum(fnum(r.get("Amount Value")) for r in team_records)
-    avg_score = (sum(fnum(r.get("% Score")) for r in team_records) / total_meetings) if total_meetings else 0.0
+    scores = [num_from_text(r.get("% Score")) for r in team_records if norm(r.get("% Score"))]
+    avg_score = (sum(scores) / len(scores)) if scores else 0.0
 
     kpis = {
         "total_meetings": total_meetings,
@@ -66,59 +184,88 @@ def process_team_data(team_records: List[Dict]) -> (Dict[str, Any], List[Dict], 
         "total_pipeline": total_pipeline,
     }
 
-    reps = sorted(set(r.get("Owner (Who handled the meeting)", "") for r in team_records))
-    team_perf = []
-    for rep in reps:
-        rep_meetings = [r for r in team_records if r.get("Owner (Who handled the meeting)", "") == rep]
-        rep_avg = (sum(fnum(r.get("% Score")) for r in rep_meetings) / len(rep_meetings)) if rep_meetings else 0
-        rep_pipe = sum(fnum(r.get("Amount Value")) for r in rep_meetings)
-        team_perf.append({"owner": rep, "meetings": len(rep_meetings), "avg_score": rep_avg, "pipeline": rep_pipe, "score_change": 0})
+    # per-owner
+    by_owner: Dict[str, List[Dict]] = {}
+    for r in team_records:
+        owner = norm(r.get("Owner (Who handled the meeting)"))
+        by_owner.setdefault(owner, []).append(r)
+
+    team_perf: List[Dict] = []
+    for owner, rows in by_owner.items():
+        mcount = len(rows)
+        avg_s = (sum(num_from_text(x.get("% Score")) for x in rows) / mcount) if mcount else 0.0
+        pipe = sum(num_from_text(x.get("Amount Value")) for x in rows)
+        team_perf.append({
+            "owner": owner,
+            "meetings": mcount,
+            "avg_score": avg_s,
+            "pipeline": pipe,
+            "score_change": 0.0,  # WoW could be computed later if needed
+        })
+
     team_perf.sort(key=lambda x: x["avg_score"], reverse=True)
+    coaching_notes: List[Dict] = []  # add rules later if desired
+    return kpis, team_perf, coaching_notes
 
-    return kpis, team_perf, []
 
+# -----------------------
+# AI Summary
+# -----------------------
 def generate_ai_summary(manager_name: str, kpis: Dict, team_data: List[Dict], config: Dict) -> str:
-    logging.info(f"Generating AI summary for {manager_name}...")
+    """Gemini first, optional OpenRouter fallback."""
     prompt = f"""
-    You are a sales analyst. Write a concise 2–3 sentence weekly summary for {manager_name}.
+You are a senior sales analyst. Write a concise 2–3 sentence executive summary for manager {manager_name} based on:
 
-    KPIs:
-    - Total Meetings: {kpis['total_meetings']}
-    - Avg Score: {kpis['avg_score']:.1f}%
-    - Pipeline: {email_formatter.format_currency(kpis['total_pipeline'])}
+KPIs:
+- Total Meetings: {kpis['total_meetings']}
+- Team Avg Score: {kpis['avg_score']:.1f}%
+- Pipeline Value: {email_formatter.format_currency(kpis['total_pipeline'])}
 
-    Team Performance:
-    {json.dumps(team_data, indent=2)}
-    """
-    # Gemini first
+Team Performance (owner, avg_score, pipeline):
+{json.dumps([{k: (round(v,1) if isinstance(v,(int,float)) else v) for k,v in m.items()} for m in team_data], indent=2)}
+"""
+
+    # Try Gemini
     try:
-        import google.generativeai as genai
         genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-        model_name = config["analysis"]["gemini_model"]
-        response = genai.GenerativeModel(model_name).generate_content(prompt)
-        return (response.text or "").strip() or "AI summary not available."
+        model = genai.GenerativeModel(config["analysis"]["gemini_model"])
+        resp = model.generate_content(prompt)
+        text = getattr(resp, "text", None)
+        if not text and getattr(resp, "candidates", None):
+            parts = getattr(resp.candidates[0], "content", None)
+            if parts and getattr(parts, "parts", None):
+                text = "".join(getattr(p, "text", "") for p in parts.parts)
+        if text:
+            return text.strip()
     except Exception as e:
         logging.error(f"Gemini failed, trying OpenRouter: {e}")
-        try:
-            import openai
-            openai.api_key = os.environ.get("OPENROUTER_API_KEY")
-            response = openai.ChatCompletion.create(
-                model=config["analysis"]["openrouter_model_name"],
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response["choices"][0]["message"]["content"].strip()
-        except Exception as e2:
-            logging.error(f"OpenRouter also failed: {e2}")
-            return "AI summary not available."
 
+    # Fallback OpenRouter (optional)
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY"))
+        completion = client.chat.completions.create(
+            model=config["analysis"]["openrouter_model_name"],
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e2:
+        logging.error(f"OpenRouter also failed: {e2}")
+        return "AI summary not available."
+
+
+# -----------------------
+# Email
+# -----------------------
 def send_email(subject: str, html_content: str, recipient: str):
     sender = os.environ.get("MAIL_USERNAME")
     password = os.environ.get("MAIL_PASSWORD")
 
     if not sender or not password:
-        logging.warning("MAIL_USERNAME or MAIL_PASSWORD not set. Printing preview.")
+        logging.warning("MAIL_USERNAME or MAIL_PASSWORD not set. Printing preview instead.")
         print("\n--- EMAIL CONTENT PREVIEW ---\n")
-        print(f"TO: {recipient}\nSUBJECT: {subject}\n{html_content[:1200]}...\n")
+        print(f"TO: {recipient}\nSUBJECT: {subject}\n{html_content[:1000]}...\n")
         return
 
     msg = MIMEMultipart("alternative")
@@ -135,28 +282,33 @@ def send_email(subject: str, html_content: str, recipient: str):
     except Exception as e:
         logging.error(f"ERROR sending email: {e}")
 
+
+# -----------------------
+# Main
+# -----------------------
 def main():
     logging.info("--- Starting Weekly Digest Generator ---")
 
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    if not config.get("weekly_digest", {}).get("enabled", False):
-        logging.info("Weekly digest disabled. Exiting.")
+    if not config.get("weekly_digest", {}).get("enabled", True):
+        logging.info("Weekly digest disabled in config.yaml. Exiting.")
         return
 
-    sheet = authenticate_google_sheets(config)
+    gsheets = authenticate_google_sheets(config)
 
     manager_emails = config.get("manager_emails", {})
     if not manager_emails:
-        logging.warning("No managers defined. Exiting.")
+        logging.warning("No managers defined in config.manager_emails. Exiting.")
         return
 
     for manager, email in manager_emails.items():
         logging.info(f"--- Generating digest for {manager} ---")
-        team_records = fetch_manager_data(sheet, config, manager)
+        team_records = fetch_manager_data(gsheets, config, manager)
+
         if not team_records:
-            logging.info(f"No data for {manager} this week.")
+            logging.info(f"No data for {manager} this period.")
             continue
 
         kpis, team_data, coaching_notes = process_team_data(team_records)
@@ -170,6 +322,7 @@ def main():
         send_email(subject, html_email, email)
 
     logging.info("--- Weekly Digest Generator Finished ---")
+
 
 if __name__ == "__main__":
     main()
