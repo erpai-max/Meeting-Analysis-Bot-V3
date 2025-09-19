@@ -11,6 +11,7 @@ import gspread
 import gdrive
 import analysis
 import sheets
+from analysis import QuotaExceeded  # NEW
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -52,10 +53,13 @@ def export_data_for_dashboard(gsheets_sheet, config):
         logging.error(f"ERROR: Could not export data for dashboard: {e}")
 
 def retry_quarantined_files(drive_service, gsheets_sheet, config):
+    """Move quarantined files back for retry after cool-off window."""
     logging.info("Checking quarantined files for retry...")
     try:
         quarantine_id = config["google_drive"]["quarantine_folder_id"]
         parent_id = config["google_drive"]["parent_folder_id"]
+        hours = int(config.get("quarantine", {}).get("auto_retry_after_hours", 24))
+        cooloff_secs = hours * 3600
 
         files = drive_service.files().list(
             q=f"'{quarantine_id}' in parents and trashed=false",
@@ -68,19 +72,21 @@ def retry_quarantined_files(drive_service, gsheets_sheet, config):
             file_name = file["name"]
 
             if created_time:
+                # createdTime format: 2025-09-18T12:34:56.000Z
                 created_epoch = time.mktime(time.strptime(created_time[:19], "%Y-%m-%dT%H:%M:%S"))
-                if (time.time() - created_epoch) > 86400:
+                if (time.time() - created_epoch) > cooloff_secs:
                     logging.info(f"Retrying quarantined file: {file_name} (ID: {file_id})")
                     try:
                         gdrive.move_file(drive_service, file_id, quarantine_id, parent_id)
-                        sheets.update_ledger(gsheets_sheet, file_id, "Moved back for retry", "Auto-retry after 1 day", config, file_name)
+                        sheets.update_ledger(gsheets_sheet, file_id, "Moved back for retry",
+                                             f"Auto-retry after {hours}h", config, file_name)
                     except Exception as e:
                         logging.error(f"ERROR: Could not move quarantined file {file_name}: {e}")
     except Exception as e:
         logging.error(f"ERROR while retrying quarantined files: {e}")
 
 def main():
-    logging.info("--- Starting Meeting Analysis Bot v5 ---")
+    logging.info("--- Starting Meeting Analysis Bot v5 (Google LLM–only) ---")
 
     config_path = "config.yaml" if os.path.exists("config.yaml") else "config.yml"
     if not os.path.exists(config_path):
@@ -109,20 +115,28 @@ def main():
         logging.warning(f"Could not read processed ledger: {e}. Continuing with empty list.")
         processed_file_ids = []
 
-    # Retry quarantine
+    # Retry quarantine (configurable cool-off)
     retry_quarantined_files(drive_service, gsheets_sheet, config)
 
     parent_folder_id = config["google_drive"]["parent_folder_id"]
     team_folders = gdrive.discover_team_folders(drive_service, parent_folder_id)
 
     logging.info("Starting to check discovered team folders...")
+    stop_due_to_quota = False  # NEW
+
     for member_name, folder_id in team_folders.items():
+        if stop_due_to_quota:
+            break
+
         logging.info(f"--- Checking folder for team member: {member_name} (ID: {folder_id}) ---")
         try:
             files_to_process = gdrive.get_files_to_process(drive_service, folder_id, processed_file_ids)
             logging.info(f"Found {len(files_to_process)} new media file(s) for {member_name}.")
 
             for file_meta in files_to_process:
+                if stop_due_to_quota:
+                    break
+
                 file_id = file_meta["id"]
                 file_name = file_meta.get("name", "Unknown Filename")
                 logging.info(f"--- Processing file: {file_name} (ID: {file_id}) ---")
@@ -133,6 +147,18 @@ def main():
                     # Move to processed folder after success
                     processed_folder_id = config["google_drive"]["processed_folder_id"]
                     gdrive.move_file(drive_service, file_id, folder_id, processed_folder_id)
+
+                except QuotaExceeded:
+                    # Quarantine already handled inside analysis or below; we stop the run
+                    logging.error("Quota exceeded — stopping this run now.")
+                    # Quarantine this file if not already moved
+                    try:
+                        gdrive.quarantine_file(drive_service, file_id, folder_id, "Gemini quota exceeded; pausing run", config)
+                        sheets.update_ledger(gsheets_sheet, file_id, "Quarantined",
+                                             "Gemini quota exceeded; pausing run", config, file_name)
+                    except Exception as qe:
+                        logging.error(f"ERROR while quarantining after quota: {qe}")
+                    stop_due_to_quota = True
 
                 except Exception as e:
                     logging.error(f"Unhandled error in main loop for file {file_name}: {e}")
