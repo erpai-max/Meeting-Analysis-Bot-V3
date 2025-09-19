@@ -42,6 +42,24 @@ def authenticate_google_sheets(config: Dict):
     ensure_tabs_exist(sheet, config)
     return sheet
 
+def _ensure_header(ws, expected_headers: List[str]):
+    """
+    Ensures the worksheet has the expected header row in A1.
+    Avoids A..Z/AA col math by writing from A1 with a single row array.
+    """
+    try:
+        current = ws.row_values(1)
+    except Exception:
+        current = []
+
+    if current != expected_headers:
+        # Resize width & write headers
+        try:
+            ws.resize(rows=max(ws.row_count, 1000), cols=len(expected_headers))
+        except Exception:
+            pass
+        ws.update("A1", [expected_headers], value_input_option="RAW")
+
 def ensure_tabs_exist(sheet, config: Dict):
     """Ensure 'Analysis Results' and 'Processed Ledger' exist with headers."""
     results_tab = config["google_sheets"]["results_tab_name"]
@@ -52,40 +70,51 @@ def ensure_tabs_exist(sheet, config: Dict):
         ws = sheet.worksheet(results_tab)
     except Exception:
         ws = sheet.add_worksheet(title=results_tab, rows="1000", cols=str(len(DEFAULT_HEADERS)))
-        ws.append_row(DEFAULT_HEADERS, value_input_option="RAW")
-
-    # If header row missing/empty, write it
-    try:
-        headers = ws.row_values(1)
-        if not headers:
-            ws.update(f"A1:{chr(64+len(DEFAULT_HEADERS))}1", [DEFAULT_HEADERS])
-    except Exception:
-        pass
+    _ensure_header(ws, DEFAULT_HEADERS)
 
     # Ledger
     try:
         lw = sheet.worksheet(ledger_tab)
     except Exception:
         lw = sheet.add_worksheet(title=ledger_tab, rows="1000", cols="5")
-        lw.append_row(LEDGER_HEADERS, value_input_option="RAW")
-
-    try:
-        lheaders = lw.row_values(1)
-        if not lheaders:
-            lw.update("A1:E1", [LEDGER_HEADERS])
-    except Exception:
-        pass
+    _ensure_header(lw, LEDGER_HEADERS)
 
 def write_analysis_result(sheet, analysis_data: Dict, config: Dict):
-    """Append a normalized analysis row into the Results sheet."""
+    """
+    Append a normalized analysis row into the Results sheet.
+    Unknown/missing fields are written as "" (empty) to match schema/dashboards.
+    """
     try:
         ws = sheet.worksheet(config["google_sheets"]["results_tab_name"])
-        row = [analysis_data.get(h, "N/A") or "N/A" for h in DEFAULT_HEADERS]
+        row = [analysis_data.get(h, "") if analysis_data.get(h, "") is not None else "" for h in DEFAULT_HEADERS]
         ws.append_row(row, value_input_option="RAW")
         logging.info(f"SUCCESS: Wrote analysis result for '{analysis_data.get('Society Name','')}'")
     except Exception as e:
         logging.error(f"ERROR writing analysis result: {e}")
         raise
+
+# --- Compatibility shims so other modules can call flexible names ---
+def append_result(sheet, analysis_data: Dict, config: Dict):
+    return write_analysis_result(sheet, analysis_data, config)
+
+def append_json(sheet, analysis_data: Dict, config: Dict):
+    # Accepts a dict (already parsed). If called with a JSON string, parse it.
+    if isinstance(analysis_data, str):
+        try:
+            analysis_data = json.loads(analysis_data)
+        except Exception:
+            logging.error("append_json received a non-JSON string; skipping.")
+            return
+    return write_analysis_result(sheet, analysis_data, config)
+
+def append_raw(sheet, raw_json_str: str, config: Dict):
+    try:
+        data = json.loads(raw_json_str)
+    except Exception:
+        logging.error("append_raw received invalid JSON; skipping.")
+        return
+    return write_analysis_result(sheet, data, config)
+# -------------------------------------------------------------------
 
 def update_ledger(sheet, file_id: str, status: str, error_msg: str, config: Dict, file_name: str):
     """Update the ledger with processing status for each file."""
@@ -98,19 +127,14 @@ def update_ledger(sheet, file_id: str, status: str, error_msg: str, config: Dict
                 row_index = i
                 break
 
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if row_index:
-            ws.update_cell(row_index, 3, status)  # Status
-            ws.update_cell(row_index, 4, (error_msg or "")[:500])  # Error
-            ws.update_cell(
-                row_index, 5,
-                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            )
+            ws.update_cell(row_index, 3, status)                      # Status
+            ws.update_cell(row_index, 4, (error_msg or "")[:500])     # Error
+            ws.update_cell(row_index, 5, timestamp)                   # Timestamp
         else:
-            ws.append_row(
-                [file_id, file_name, status, (error_msg or "")[:500],
-                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-                value_input_option="RAW"
-            )
+            ws.append_row([file_id, file_name, status, (error_msg or "")[:500], timestamp],
+                          value_input_option="RAW")
         logging.info(f"SUCCESS: Ledger updated → {file_name} ({status})")
     except Exception as e:
         logging.error(f"ERROR updating ledger for file {file_name}: {e}")
