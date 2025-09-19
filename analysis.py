@@ -1,7 +1,7 @@
 # --- Quiet gRPC/absl logs BEFORE importing Google/gRPC libraries ---
 import os
-os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
-os.environ.setdefault("GRPC_CPP_VERBOSITY", "ERROR")
+os.environ.setdefault("GRPC_VERBOSITY", "NONE")
+os.environ.setdefault("GRPC_CPP_VERBOSITY", "NONE")
 
 import io
 import re
