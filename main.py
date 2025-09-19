@@ -2,6 +2,8 @@
 import os
 os.environ.setdefault("GRPC_VERBOSITY", "NONE")
 os.environ.setdefault("GRPC_CPP_VERBOSITY", "NONE")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("ABSL_LOGGING_MIN_LOG_LEVEL", "3")
 
 import yaml
 import logging
@@ -15,7 +17,7 @@ import gspread
 import gdrive
 import analysis
 import sheets
-from analysis import QuotaExceeded  # NEW
+from analysis import QuotaExceeded  # for stop-on-quota
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -76,6 +78,7 @@ def retry_quarantined_files(drive_service, gsheets_sheet, config):
             file_name = file["name"]
 
             if created_time:
+                # createdTime format: 2025-09-18T12:34:56.000Z
                 created_epoch = time.mktime(time.strptime(created_time[:19], "%Y-%m-%dT%H:%M:%S"))
                 if (time.time() - created_epoch) > cooloff_secs:
                     logging.info(f"Retrying quarantined file: {file_name} (ID: {file_id})")
@@ -104,6 +107,12 @@ def main():
         logging.error(f"CRITICAL: Could not load config file: {e}. Exiting.")
         sys.exit(1)
 
+    # Processing knobs
+    proc_conf = config.get("processing", {})
+    max_files = int(proc_conf.get("max_files_per_run", 999999))
+    per_file_sleep = float(proc_conf.get("sleep_between_files_sec", 0.0))
+    processed_this_run = 0
+
     drive_service, gsheets_sheet = authenticate_google(config)
     if not drive_service or not gsheets_sheet:
         sys.exit(1)
@@ -125,7 +134,7 @@ def main():
     team_folders = gdrive.discover_team_folders(drive_service, parent_folder_id)
 
     logging.info("Starting to check discovered team folders...")
-    stop_due_to_quota = False  # NEW
+    stop_due_to_quota = False  # stop immediately on quota
 
     for member_name, folder_id in team_folders.items():
         if stop_due_to_quota:
@@ -138,6 +147,10 @@ def main():
 
             for file_meta in files_to_process:
                 if stop_due_to_quota:
+                    break
+                if processed_this_run >= max_files:
+                    logging.info(f"Reached max_files_per_run={max_files}. Ending this run gracefully.")
+                    stop_due_to_quota = True  # soft stop for this run
                     break
 
                 file_id = file_meta["id"]
@@ -166,6 +179,11 @@ def main():
                     logging.error(f"Unhandled error in main loop for file {file_name}: {e}")
                     gdrive.quarantine_file(drive_service, file_id, folder_id, str(e), config)
                     sheets.update_ledger(gsheets_sheet, file_id, "Quarantined", str(e), config, file_name)
+
+                # Throttle to protect RPM
+                processed_this_run += 1
+                if per_file_sleep > 0 and not stop_due_to_quota:
+                    time.sleep(per_file_sleep)
 
         except Exception as e:
             logging.error(f"CRITICAL ERROR while processing {member_name}'s folder: {e}")
