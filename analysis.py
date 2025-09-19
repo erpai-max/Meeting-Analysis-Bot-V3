@@ -1,8 +1,11 @@
+# --- Quiet gRPC/absl logs BEFORE importing Google/gRPC libraries ---
 import os
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+os.environ.setdefault("GRPC_CPP_VERBOSITY", "ERROR")
+
 import io
 import re
 import json
-import math
 import logging
 import datetime as dt
 from typing import Dict, Any, Tuple, List, Set, Optional
@@ -141,30 +144,48 @@ def _pick_date_for_output(file_name: str, created_time_iso: Optional[str]) -> st
 
 # ---------- Duration extraction ----------
 def _millis_to_minutes(ms: int) -> str:
-    mins = int(round(ms / 60000.0))
-    return f"{mins}"
+    return f"{int(round(ms / 60000.0))}"
 
 def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: str) -> str:
+    """
+    Prefers Drive videoMediaMetadata.durationMillis (videos).
+    For audio, use mutagen (mp3/m4a/ogg/wav/etc.). Falls back to WAV wave reader if needed.
+    Returns integer minutes as a string.
+    """
+    # 1) Video metadata from Drive
     vmeta = meta.get("videoMediaMetadata") or {}
     dur_ms = vmeta.get("durationMillis")
     if isinstance(dur_ms, (int, float)) and dur_ms > 0:
         return _millis_to_minutes(int(dur_ms))
-    if mime_type.startswith("audio/"):
+
+    # 2) Audio duration via mutagen
+    try:
+        from mutagen import File as MutagenFile
+        mf = MutagenFile(local_path)
+        if mf is not None and getattr(mf, "info", None) and getattr(mf.info, "length", None):
+            seconds = float(mf.info.length)
+            return f"{int(round(seconds / 60.0))}"
+    except Exception:
+        pass
+
+    # 3) WAV fallback without mutagen (if applicable)
+    if local_path.lower().endswith(".wav"):
         try:
-            if local_path.lower().endswith(".wav"):
-                import wave
-                with wave.open(local_path, "rb") as w:
-                    frames = w.getnframes()
-                    rate = w.getframerate()
-                    seconds = frames / float(rate)
-                    return f"{int(round(seconds / 60.0))}"
+            import wave
+            with wave.open(local_path, "rb") as w:
+                frames = w.getnframes()
+                rate = w.getframerate()
+                seconds = frames / float(rate)
+                return f"{int(round(seconds / 60.0))}"
         except Exception:
             pass
+
     return "NA"
 
 # ---------- ERP/ASP coverage & missed-opps ----------
 def _normalize_text(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip().lower()
+    import re as _re
+    return _re.sub(r"\s+", " ", s or "").strip().lower()
 
 def _match_coverage(transcript: str, feature_map: Dict[str, List[str]]) -> Tuple[Set[str], Set[str]]:
     text = _normalize_text(transcript)
@@ -199,7 +220,10 @@ def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
         "Financial reports (non-audited)", "Dedicated remote accountant"
     ]
     missed_all = list(sorted(erp_missed.union(asp_missed)))
-    missed_sorted = sorted(missed_all, key=lambda x: (0 if x in priority else 1, priority.index(x) if x in priority else 999, x))
+    missed_sorted = sorted(
+        missed_all,
+        key=lambda x: (0 if x in priority else 1, priority.index(x) if x in priority else 999, x)
+    )
     missed_text = ", ".join(missed_sorted) if missed_sorted else ""
     return feature_coverage_summary, missed_text
 
