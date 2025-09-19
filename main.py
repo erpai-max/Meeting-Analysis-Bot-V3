@@ -1,4 +1,8 @@
+# --- Quiet gRPC/absl logs BEFORE importing Google/gRPC libraries ---
 import os
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+os.environ.setdefault("GRPC_CPP_VERBOSITY", "ERROR")
+
 import yaml
 import logging
 import json
@@ -72,7 +76,6 @@ def retry_quarantined_files(drive_service, gsheets_sheet, config):
             file_name = file["name"]
 
             if created_time:
-                # createdTime format: 2025-09-18T12:34:56.000Z
                 created_epoch = time.mktime(time.strptime(created_time[:19], "%Y-%m-%dT%H:%M:%S"))
                 if (time.time() - created_epoch) > cooloff_secs:
                     logging.info(f"Retrying quarantined file: {file_name} (ID: {file_id})")
@@ -149,7 +152,6 @@ def main():
                     gdrive.move_file(drive_service, file_id, folder_id, processed_folder_id)
 
                 except QuotaExceeded:
-                    # Quarantine already handled inside analysis or below; we stop the run
                     logging.error("Quota exceeded — stopping this run now.")
                     # Quarantine this file if not already moved
                     try:
