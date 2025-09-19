@@ -2,6 +2,8 @@
 import os
 os.environ.setdefault("GRPC_VERBOSITY", "NONE")
 os.environ.setdefault("GRPC_CPP_VERBOSITY", "NONE")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("ABSL_LOGGING_MIN_LOG_LEVEL", "3")
 
 import io
 import re
@@ -245,6 +247,9 @@ Strictly return a single JSON object (no prose outside JSON).
 If a field is unknown, set it to "" (empty string).
 """).strip()
 
+def _is_one_shot(config: Dict[str, Any]) -> bool:
+    return bool(config.get("google_llm", {}).get("one_shot", False))
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(3),
@@ -304,15 +309,77 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
             raise QuotaExceeded(msg)
         raise
 
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=20),
+    retry=retry_if_exception_type((QuotaExceeded, RuntimeError))
+)
+def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_name: str) -> Dict[str, Any]:
+    """
+    Single-call path: upload audio + ask for final JSON directly.
+    If your prompt includes `transcript_full`, we'll use it for deterministic coverage.
+    """
+    try:
+        model = genai.GenerativeModel(model_name)
+        uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
+        resp = model.generate_content(
+            [uploaded, {"text": master_prompt}],
+            generation_config={
+                "temperature": 0.2,
+                "response_mime_type": "application/json",
+            },
+        )
+        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
+            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+        raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise RuntimeError("One-shot output is not a JSON object.")
+        return data
+    except json.JSONDecodeError as je:
+        raise RuntimeError(f"Failed to parse JSON from one-shot model: {je}") from je
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ["quota", "rate limit", "resourceexhausted"]):
+            raise QuotaExceeded(msg)
+        raise
+
+# ---------- Manager info enrichment ----------
+def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]) -> None:
+    """
+    Fill Owner/Email/Manager/Team/Manager Email using config.manager_map / manager_emails.
+    Does not override if already present in analysis_obj.
+    """
+    try:
+        m = (config.get("manager_map") or {}).get(member_name)
+        if m:
+            analysis_obj.setdefault("Owner (Who handled the meeting)", member_name)
+            analysis_obj.setdefault("Email Id", m.get("Email", ""))
+            analysis_obj.setdefault("Manager", m.get("Manager", ""))
+            analysis_obj.setdefault("Team", m.get("Team", ""))
+            mgr_email = (config.get("manager_emails") or {}).get(m.get("Manager", ""), "")
+            analysis_obj.setdefault("Manager Email", mgr_email)
+        else:
+            analysis_obj.setdefault("Owner (Who handled the meeting)", member_name)
+    except Exception:
+        # never break the run for metadata enrichment
+        pass
+
 # ---------- Sheets I/O ----------
 def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, duration_min: str,
-                   feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any], config: Dict[str, Any]):
+                   feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any],
+                   member_name: str, config: Dict[str, Any]):
     import sheets  # local module
 
     analysis_obj["Date"] = date_out
     analysis_obj["Meeting duration (min)"] = duration_min
-    analysis_obj["Feature Checklist Coverage"] = feature_coverage
-    analysis_obj["Missed Opportunities"] = missed_opps
+    if feature_coverage:
+        analysis_obj["Feature Checklist Coverage"] = feature_coverage
+    if missed_opps:
+        analysis_obj["Missed Opportunities"] = missed_opps
+
+    _augment_with_manager_info(analysis_obj, member_name, config)
 
     status_note = f"Processed via Gemini; duration={duration_min}m"
     sheets.update_ledger(gsheets_sheet, file_id, "Processed", status_note, config, file_name)
@@ -329,7 +396,7 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
 # =========================
 def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
-    Orchestrates: metadata -> download -> transcribe -> analyze -> enrich -> write sheets.
+    Orchestrates: metadata -> download -> (one-shot OR transcribe+analyze) -> enrich -> write.
     Exceptions are allowed to bubble so main.py can quarantine & stop on quota.
     """
     _init_gemini()
@@ -354,22 +421,36 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
     # Duration (minutes)
     duration_min = _probe_duration_minutes(meta, local_path, mime_type)
 
-    # Transcribe
-    transcript = _gemini_transcribe(local_path, mime_type, _get_model(config))
-    logging.info(f"Transcript length: {len(transcript)} chars")
+    # Prompt
+    master_prompt = _load_master_prompt(config)
+
+    # One-shot vs Two-call
+    transcript = ""
+    if _is_one_shot(config):
+        analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, _get_analysis_model(config))
+        transcript = analysis_obj.get("transcript_full", "")
+    else:
+        transcript = _gemini_transcribe(local_path, mime_type, _get_model(config))
+        logging.info(f"Transcript length: {len(transcript)} chars")
+        analysis_obj = _gemini_analyze(transcript, master_prompt, _get_analysis_model(config))
 
     # Deterministic coverage/missed-opps
-    feature_coverage, missed_opps = _feature_coverage_and_missed(transcript)
-
-    # Analyze with your master prompt → JSON
-    master_prompt = _load_master_prompt(config)
-    analysis_obj = _gemini_analyze(transcript, master_prompt, _get_analysis_model(config))
+    feature_coverage, missed_opps = ("", "")
+    try:
+        if transcript:
+            feature_coverage, missed_opps = _feature_coverage_and_missed(transcript)
+        else:
+            # fallback: if model already provided these, keep them
+            feature_coverage = analysis_obj.get("Feature Checklist Coverage", "")
+            missed_opps = analysis_obj.get("Missed Opportunities", "")
+    except Exception:
+        pass
 
     # Ensure fields exist
     analysis_obj.setdefault("Date", "")
     analysis_obj.setdefault("Meeting duration (min)", "")
-    analysis_obj.setdefault("Feature Checklist Coverage", "")
-    analysis_obj.setdefault("Missed Opportunities", "")
+    analysis_obj.setdefault("Feature Checklist Coverage", feature_coverage or "")
+    analysis_obj.setdefault("Missed Opportunities", missed_opps or "")
 
     # Write
     _write_success(
@@ -381,6 +462,7 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
         feature_coverage=feature_coverage,
         missed_opps=missed_opps,
         analysis_obj=analysis_obj,
+        member_name=member_name,
         config=config,
     )
 
