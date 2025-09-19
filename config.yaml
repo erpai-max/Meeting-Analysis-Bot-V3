@@ -1,5 +1,5 @@
 # ===================================================================
-# CONFIGURATION FILE for Meeting Analysis Bot v5
+# CONFIGURATION FILE for Meeting Analysis Bot v5 (Google LLM–only)
 # ===================================================================
 
 google_drive:
@@ -12,7 +12,7 @@ google_sheets:
   results_tab_name: "Analysis Results"
   ledger_tab_name: "Processed Ledger"
 
-# Maps team member folder name → default Manager/Team/Email
+# Maps team member folder name → default Manager/Team/Email (KEEP THIS)
 manager_map:
   Sripal: { Manager: "Saleem", Team: "Chennai", Email: "sripal.r@nobroker.in" }
   Sharath: { Manager: "Saleem", Team: "Bangalore", Email: "sharath.k@nobroker.in" }
@@ -31,17 +31,28 @@ manager_map:
   Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
   Dipesh: { Manager: "Self", Team: "Management", Email: "dipesh.karale@nobroker.in" }
 
+# Used by weekly digest emails (KEEP THIS)
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
   Pratik: "pratik.ray@nobroker.in"
 
-analysis:
-  prompt_path: "prompt.txt"        # external prompt (optional)
-  whisper_model: "small"           # or "base", "tiny.en", etc.
-  whisper_device: "cpu"            # cpu / cuda
-  gemini_model: "gemini-1.5-flash"
-  openrouter_model_name: "gpt-4o-mini"
+# Google LLM settings (REPLACES old 'analysis:' whisper/openrouter keys)
+google_llm:
+  model: "gemini-1.5-flash"       # transcription
+  analysis_model: "gemini-1.5-pro" # JSON analysis
+  schema_prompt: |
+    Act as an expert business analyst for society-management ERP & ASP meetings.
+    Return a single valid JSON object. If a field is unknown, set "N/A".
+    Keep writing concise and business-friendly.
+
+# Quarantine re-try window (used by main.py’s retry_quarantined_files)
+quarantine:
+  auto_retry_after_hours: 6
+
+runtime:
+  tmp_dir: "/tmp"
 
 weekly_digest:
   enabled: true
+  last_n_days: 7
