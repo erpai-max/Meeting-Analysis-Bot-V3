@@ -23,7 +23,6 @@ class QuotaExceeded(Exception):
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
 
-# Lightweight ERP / ASP feature taxonomy (expand freely)
 ERP_FEATURES = {
     "Tally import/export": ["tally", "tally import", "tally export"],
     "E-invoicing": ["e-invoice", "e invoicing", "einvoice"],
@@ -61,7 +60,6 @@ ASP_FEATURES = {
 # =========================
 # Utility Helpers
 # =========================
-
 def _is_media_supported(mime_type: str) -> bool:
     return bool(mime_type) and any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES)
 
@@ -93,14 +91,10 @@ def _download_drive_file(drive_service, file_id: str, out_path: str) -> Tuple[st
     return mime_type, out_path
 
 # ---------- Date extraction ----------
-
 _DATE_PATTERNS = [
-    # dd-mm-yyyy / dd/mm/yyyy / dd.mm.yyyy
-    (re.compile(r"\b(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{4})\b"), "%d-%m-%Y"),
-    # yyyy-mm-dd
-    (re.compile(r"\b(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})\b"), "%Y-%m-%d"),
-    # yyyymmdd
-    (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), "%Y%m%d"),
+    (re.compile(r"\b(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{4})\b"), "%d-%m-%Y"), # dd-mm-yyyy
+    (re.compile(r"\b(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})\b"), "%Y-%m-%d"), # yyyy-mm-dd
+    (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), "%Y%m%d"),                 # yyyymmdd
 ]
 
 def _format_ddmmyy(d: dt.date) -> str:
@@ -132,18 +126,13 @@ def _extract_date_from_name(name: str) -> Optional[str]:
 
 def _pick_date_for_output(file_name: str, created_time_iso: Optional[str]) -> str:
     """
-    Priority:
-    1) date in filename (various formats)
-    2) Drive createdTime
-    3) "NA"
-    Always output dd/mm/yy
+    1) date in filename → 2) Drive createdTime → 3) "NA"; format dd/mm/yy
     """
     from_name = _extract_date_from_name(file_name)
     if from_name:
         return from_name
     if created_time_iso:
         try:
-            # createdTime like "2025-09-18T12:34:56.000Z"
             d = dt.datetime.fromisoformat(created_time_iso.replace("Z", "+00:00")).date()
             return _format_ddmmyy(d)
         except Exception:
@@ -151,23 +140,15 @@ def _pick_date_for_output(file_name: str, created_time_iso: Optional[str]) -> st
     return "NA"
 
 # ---------- Duration extraction ----------
-
 def _millis_to_minutes(ms: int) -> str:
     mins = int(round(ms / 60000.0))
     return f"{mins}"
 
 def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: str) -> str:
-    """
-    Prefers Drive videoMediaMetadata.durationMillis (videos).
-    Basic fallbacks for a few audio types; otherwise NA.
-    Returns only minutes (integer string).
-    """
     vmeta = meta.get("videoMediaMetadata") or {}
     dur_ms = vmeta.get("durationMillis")
     if isinstance(dur_ms, (int, float)) and dur_ms > 0:
         return _millis_to_minutes(int(dur_ms))
-
-    # If it's audio, attempt a light fallback for WAV
     if mime_type.startswith("audio/"):
         try:
             if local_path.lower().endswith(".wav"):
@@ -179,12 +160,9 @@ def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: st
                     return f"{int(round(seconds / 60.0))}"
         except Exception:
             pass
-
-    # As a last resort, NA (we avoid heavy deps like ffprobe here)
     return "NA"
 
 # ---------- ERP/ASP coverage & missed-opps ----------
-
 def _normalize_text(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip().lower()
 
@@ -210,15 +188,10 @@ def _build_feature_summary(covered_all: Set[str], total: int, label: str) -> str
 def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
     erp_cov, erp_missed = _match_coverage(transcript, ERP_FEATURES)
     asp_cov, asp_missed = _match_coverage(transcript, ASP_FEATURES)
-
-    # Feature Checklist Coverage (short summary)
-    coverage_parts = []
-    coverage_parts.append(_build_feature_summary(erp_cov, len(ERP_FEATURES), "ERP"))
-    coverage_parts.append(_build_feature_summary(asp_cov, len(ASP_FEATURES), "ASP"))
-    feature_coverage_summary = " ".join(coverage_parts)
-
-    # Missed Opportunities — combine important items not discussed
-    # Prioritize higher-impact items near the top
+    feature_coverage_summary = " ".join([
+        _build_feature_summary(erp_cov, len(ERP_FEATURES), "ERP"),
+        _build_feature_summary(asp_cov, len(ASP_FEATURES), "ASP")
+    ])
     priority = [
         "Tally import/export", "Bank reconciliation", "UPI/cards gateway",
         "Defaulter tracking", "PO / WO approvals", "Inventory",
@@ -226,14 +199,11 @@ def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
         "Financial reports (non-audited)", "Dedicated remote accountant"
     ]
     missed_all = list(sorted(erp_missed.union(asp_missed)))
-    # Reorder by priority first, then others
     missed_sorted = sorted(missed_all, key=lambda x: (0 if x in priority else 1, priority.index(x) if x in priority else 999, x))
-
     missed_text = ", ".join(missed_sorted) if missed_sorted else ""
     return feature_coverage_summary, missed_text
 
 # ---------- Gemini calls ----------
-
 def _get_model(config: Dict[str, Any]) -> str:
     return config.get("google_llm", {}).get("model", "gemini-1.5-flash")
 
@@ -241,7 +211,6 @@ def _get_analysis_model(config: Dict[str, Any]) -> str:
     return config.get("google_llm", {}).get("analysis_model", _get_model(config))
 
 def _load_master_prompt(config: Dict[str, Any]) -> str:
-    # Prefer prompt.txt alongside repo; else config; else fallback
     prompt_path = os.path.join(os.getcwd(), "prompt.txt")
     if os.path.exists(prompt_path):
         with open(prompt_path, "r", encoding="utf-8") as f:
@@ -312,22 +281,18 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
         raise
 
 # ---------- Sheets I/O ----------
-
 def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, duration_min: str,
                    feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any], config: Dict[str, Any]):
-    import sheets  # your local module
+    import sheets  # local module
 
-    # Ensure the four fields are present / overwritten in the JSON that goes to your "Results" tab
-    analysis_obj["Date"] = date_out                 # dd/mm/yy or "NA"
-    analysis_obj["Meeting duration (min)"] = duration_min  # mins string, e.g., "30"
+    analysis_obj["Date"] = date_out
+    analysis_obj["Meeting duration (min)"] = duration_min
     analysis_obj["Feature Checklist Coverage"] = feature_coverage
     analysis_obj["Missed Opportunities"] = missed_opps
 
-    # 1) mark the ledger row
     status_note = f"Processed via Gemini; duration={duration_min}m"
     sheets.update_ledger(gsheets_sheet, file_id, "Processed", status_note, config, file_name)
 
-    # 2) append the structured analysis row
     if hasattr(sheets, "append_result"):
         sheets.append_result(gsheets_sheet, analysis_obj, config)
     elif hasattr(sheets, "append_json"):
@@ -336,9 +301,8 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
         sheets.append_raw(gsheets_sheet, json.dumps(analysis_obj, ensure_ascii=False), config)
 
 # =========================
-# Entry point (called by main.py)
+# Entry point
 # =========================
-
 def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
     Orchestrates: metadata -> download -> transcribe -> analyze -> enrich -> write sheets.
@@ -354,38 +318,36 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
 
     logging.info(f"[Gemini-only] Processing: {file_name} ({mime_type})")
 
-    # --- Date selection & formatting (dd/mm/yy) ---
+    # Date (dd/mm/yy)
     date_out = _pick_date_for_output(file_name, created_iso)
 
-    # --- Download (needed for transcription + some duration fallbacks) ---
+    # Download
     tmp_dir = config.get("runtime", {}).get("tmp_dir", "/tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     local_path = os.path.join(tmp_dir, f"{file_id}_{file_name}".replace("/", "_"))
-    if not _is_media_supported(mime_type):
-        logging.info("MIME type not reliable; still downloading and proceeding.")
     _, _ = _download_drive_file(drive_service, file_id, local_path)
 
-    # --- Duration (minutes) ---
+    # Duration (minutes)
     duration_min = _probe_duration_minutes(meta, local_path, mime_type)
 
-    # --- Transcribe ---
+    # Transcribe
     transcript = _gemini_transcribe(local_path, mime_type, _get_model(config))
     logging.info(f"Transcript length: {len(transcript)} chars")
 
-    # --- Local, deterministic ERP/ASP coverage + missed opps ---
+    # Deterministic coverage/missed-opps
     feature_coverage, missed_opps = _feature_coverage_and_missed(transcript)
 
-    # --- Analyze with your master prompt (JSON out) ---
+    # Analyze with your master prompt → JSON
     master_prompt = _load_master_prompt(config)
     analysis_obj = _gemini_analyze(transcript, master_prompt, _get_analysis_model(config))
 
-    # Ensure headers we care about exist even if model omitted them
+    # Ensure fields exist
     analysis_obj.setdefault("Date", "")
     analysis_obj.setdefault("Meeting duration (min)", "")
     analysis_obj.setdefault("Feature Checklist Coverage", "")
     analysis_obj.setdefault("Missed Opportunities", "")
 
-    # --- Write ---
+    # Write
     _write_success(
         gsheets_sheet=gsheets_sheet,
         file_id=file_id,
