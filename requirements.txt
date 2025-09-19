@@ -1,10 +1,10 @@
-# Core Google Libraries
+# Core Google
 google-api-python-client>=2.125.0
 google-auth>=2.22.0
 google-auth-oauthlib>=1.1.0
 gspread>=5.7.2
 
-# Google AI (LLM + transcription)
+# Google AI (Gemini)
 google-generativeai>=0.5.4
 httpx>=0.27.0
 
@@ -14,7 +14,8 @@ tenacity>=8.2.3
 requests>=2.31.0
 pandas>=2.1.0
 numpy>=1.26.0
+mutagen>=1.47.0   # for accurate audio duration (mp3/m4a/ogg/wav)
 
-# Visualization (optional for digests & reports)
+# Optional (reports/digests)
 matplotlib>=3.7.2
 pillow>=10.0.0
