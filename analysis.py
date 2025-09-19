@@ -1,470 +1,401 @@
 import os
+import io
 import re
 import json
+import math
 import logging
-from typing import Dict, Any, List, Tuple
-from datetime import datetime
-from faster_whisper import WhisperModel
+import datetime as dt
+from typing import Dict, Any, Tuple, List, Set, Optional
+
 import google.generativeai as genai
+from googleapiclient.http import MediaIoBaseDownload
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-import sheets
-from gdrive import move_to_processed, quarantine_file
+# =========================
+# Exceptions
+# =========================
+class QuotaExceeded(Exception):
+    """Raised when Gemini quota/rate-limit is hit."""
+    pass
 
+# =========================
+# Constants & Feature Maps
+# =========================
+ALLOWED_MIME_PREFIXES = ("audio/", "video/")
 
-# ----------------------------------
-# Prompt loader
-# ----------------------------------
-def _load_prompt(owner_name: str) -> str:
-    """Load prompt.txt and inject owner_name placeholder if present."""
-    try:
-        with open("prompt.txt", "r", encoding="utf-8") as f:
-            prompt = f.read()
-        return prompt.replace("{owner_name}", owner_name)
-    except Exception as e:
-        logging.warning(f"Could not read prompt.txt; using minimal inline prompt. Error: {e}")
-        return (
-            "You are an expert sales meeting analyst. "
-            "Return a single JSON object with the exact 47 keys I provide. "
-            "If a field is not present, return \"N/A\". "
-            "All values must be strings."
-        )
+# Lightweight ERP / ASP feature taxonomy (expand freely)
+ERP_FEATURES = {
+    "Tally import/export": ["tally", "tally import", "tally export"],
+    "E-invoicing": ["e-invoice", "e invoicing", "einvoice"],
+    "Bank reconciliation": ["bank reconciliation", "reco", "reconciliation"],
+    "Vendor accounting": ["vendor accounting", "vendors ledger"],
+    "Budgeting": ["budget", "budgeting"],
+    "350+ bill combinations": ["bill combinations", "billing combinations"],
+    "PO / WO approvals": ["purchase order", "po approval", "work order", "wo approval"],
+    "Asset tagging via QR": ["asset tag", "qr asset", "asset qr"],
+    "Inventory": ["inventory"],
+    "Meter reading → auto invoices": ["meter reading", "auto invoice", "metering"],
+    "Maker-checker billing": ["maker checker", "maker-checker"],
+    "Reminders & Late fee calc": ["reminder", "late fee"],
+    "UPI/cards gateway": ["upi", "payment gateway", "cards"],
+    "Virtual accounts per unit": ["virtual account", "virtual accounts"],
+    "Preventive maintenance": ["preventive maintenance", "pm schedule"],
+    "Role-based access": ["role based", "role-based"],
+    "Defaulter tracking": ["defaulter", "arrears tracking"],
+    "GST/TDS reports": ["gst", "tds"],
+    "Balance sheet & dashboards": ["balance sheet", "dashboard"],
+}
 
+ASP_FEATURES = {
+    "Managed accounting (bills & receipts)": ["managed accounting", "computerized bills", "receipts"],
+    "Bookkeeping (all incomes/expenses)": ["bookkeeping", "income expense"],
+    "Bank reconciliation + suspense": ["suspense", "bank reconciliation", "reco"],
+    "Financial reports (non-audited)": ["financial report", "non audited", "trial balance", "p&l", "profit and loss"],
+    "Finalisation support & audit coordination": ["finalisation", "audit coordination", "auditor"],
+    "Vendor & PO/WO management": ["vendor management", "po", "wo", "work order"],
+    "Inventory & amenities booking": ["inventory", "amenities booking", "amenity booking"],
+    "Dedicated remote accountant": ["remote accountant", "dedicated accountant"],
+    "Annual data backup": ["annual data back", "backup", "data backup"],
+}
 
-# ----------------------------------
-# JSON cleaning / parsing helpers
-# ----------------------------------
-def _clean_and_parse_json(raw_text: str) -> Dict[str, Any]:
-    """
-    Extract a single JSON object from an LLM response.
-    Handles code fences, extra commentary, trailing commas, fancy quotes, etc.
-    """
-    if not raw_text:
-        raise ValueError("Empty model response")
+# =========================
+# Utility Helpers
+# =========================
 
-    txt = raw_text.strip()
+def _is_media_supported(mime_type: str) -> bool:
+    return bool(mime_type) and any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES)
 
-    # Strip code fences like ```json ... ```
-    if txt.startswith("```"):
-        txt = re.sub(r"^```(?:json)?", "", txt, flags=re.IGNORECASE).strip()
-        txt = re.sub(r"```$", "", txt).strip()
+def _init_gemini():
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY env var not set")
+    genai.configure(api_key=api_key)
 
-    # Prefer the largest {...} block
-    start = txt.find("{")
-    end = txt.rfind("}")
-    candidate = None
-    if start != -1 and end != -1 and end > start:
-        candidate = txt[start : end + 1]
-    else:
-        # Try to balance braces greedily
-        braces = 0
-        start_idx = None
-        for i, ch in enumerate(txt):
-            if ch == "{":
-                if braces == 0:
-                    start_idx = i
-                braces += 1
-            elif ch == "}":
-                braces -= 1
-                if braces == 0 and start_idx is not None:
-                    candidate = txt[start_idx : i + 1]
-                    break
+def _drive_get_metadata(drive_service, file_id: str) -> Dict[str, Any]:
+    """Fetch rich metadata: name, mimeType, createdTime, and duration for videos."""
+    fields = (
+        "id,name,mimeType,createdTime,"
+        "videoMediaMetadata(durationMillis,height,width),"
+        "size,parents"
+    )
+    return drive_service.files().get(fileId=file_id, fields=fields).execute()
 
-    if not candidate:
-        raise ValueError("Could not locate a JSON object in model response")
+def _download_drive_file(drive_service, file_id: str, out_path: str) -> Tuple[str, str]:
+    """Download a Drive file to out_path. Returns (mime_type, out_path)."""
+    meta = drive_service.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
+    mime_type = meta.get("mimeType", "")
+    request = drive_service.files().get_media(fileId=file_id)
+    with io.FileIO(out_path, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+    return mime_type, out_path
 
-    # First parse attempt
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError:
-        # Gentle repairs
-        repaired = candidate
+# ---------- Date extraction ----------
 
-        # remove trailing commas before } or ]
-        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
-
-        # replace fancy quotes
-        repaired = repaired.replace("“", '"').replace("”", '"').replace("’", "'")
-
-        # remove stray newlines before opening quotes
-        repaired = re.sub(r'\n\s*(")', r'\1', repaired)
-
-        # sometimes percent fields come as numbers; leave that to normalization
-
-        try:
-            return json.loads(repaired)
-        except Exception as e2:
-            logging.error("JSON parse failed. First 300 chars:\n" + candidate[:300])
-            raise ValueError(f"Failed to parse JSON from model output: {e2}") from e2
-
-
-# ----------------------------------
-# Filename heuristics (useful fallbacks)
-# ----------------------------------
-def _infer_from_filename(file_name: str) -> Dict[str, str]:
-    """
-    Guess some fields using common naming patterns like:
-    'Vasudha l DEMO l Ahmedabad l 24-08-25 l.mp3'
-    """
-    out: Dict[str, str] = {}
-    if not file_name:
-        return out
-
-    stem = os.path.splitext(file_name)[0]
-
-    # Normalize separators: treat '|', '-', '_', ' l ' as boundaries
-    parts = re.split(r"\s*(?:\||-|–|—|_| l )\s*", stem)
-    parts = [p.strip() for p in parts if p.strip()]
-
-    # Society Name -> very often first chunk
-    if parts:
-        out["Society Name"] = parts[0]
-
-    joined = " ".join(parts).lower()
-
-    # Meeting type hints
-    if "demo" in joined:
-        out["Meeting Type"] = "ERP Pitch"
-    if "training" in joined or "support" in joined:
-        out["Meeting Type"] = "Training / Issue Resolution"
-    if "renewal" in joined or "commercial" in joined or "commercials" in joined:
-        out["Meeting Type"] = "Renewal / Commercials"
-
-    # Visit type hints (very rough)
-    if "zoom" in joined or "meet" in joined or "google meet" in joined:
-        out["Visit Type"] = "Virtual"
-    elif "call" in joined or "phone" in joined:
-        out["Visit Type"] = "Phone"
-    elif "demo" in joined:
-        # default guess
-        out["Visit Type"] = out.get("Visit Type", "Onsite")
-
-    # Date (DD-MM-YY/YYYY or DD_MM_YYYY or 31-08-25)
-    m = re.search(r"(\d{1,2})[-_/](\d{1,2})[-_/](\d{2,4})", stem)
-    if m:
-        d, mo, y = m.groups()
-        if len(y) == 2:
-            y = "20" + y
-        try:
-            dt = datetime(int(y), int(mo), int(d))
-            out["Date"] = dt.strftime("%Y-%m-%d")
-        except Exception:
-            # leave as N/A if invalid
-            pass
-
-    return out
-
-
-# ----------------------------------
-# Score utilities
-# ----------------------------------
-SCORE_KEYS = [
-    "Opening Pitch Score",
-    "Product Pitch Score",
-    "Cross-Sell / Opportunity Handling",
-    "Closing Effectiveness",
-    "Negotiation Strength",
+_DATE_PATTERNS = [
+    # dd-mm-yyyy / dd/mm/yyyy / dd.mm.yyyy
+    (re.compile(r"\b(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{4})\b"), "%d-%m-%Y"),
+    # yyyy-mm-dd
+    (re.compile(r"\b(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})\b"), "%Y-%m-%d"),
+    # yyyymmdd
+    (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), "%Y%m%d"),
 ]
 
-def _to_int_or_none(x: Any) -> int | None:
-    try:
-        s = str(x).strip()
-        if not s or s.upper() == "N/A":
-            return None
-        # remove trailing % if someone put that
-        s = s.replace("%", "")
-        n = int(float(s))
-        return n
-    except Exception:
-        return None
+def _format_ddmmyy(d: dt.date) -> str:
+    return d.strftime("%d/%m/%y")
 
-def _sanitize_and_compute_scores(row: Dict[str, str]) -> None:
+def _extract_date_from_name(name: str) -> Optional[str]:
+    base = os.path.splitext(name)[0]
+    base = base.replace("|", " ").replace("_", " ").replace(".", " ")
+    for rx, fmt in _DATE_PATTERNS:
+        m = rx.search(base)
+        if m:
+            g = m.groups()
+            try:
+                if fmt == "%d-%m-%Y":
+                    dd, mm, yyyy = int(g[0]), int(g[1]), int(g[2])
+                    parsed = dt.date(yyyy, mm, dd)
+                elif fmt == "%Y-%m-%d":
+                    yyyy, mm, dd = int(g[0]), int(g[1]), int(g[2])
+                    parsed = dt.date(yyyy, mm, dd)
+                elif fmt == "%Y%m%d":
+                    yyyy, mm, dd = int(g[0]), int(g[1]), int(g[2])
+                    parsed = dt.date(yyyy, mm, dd)
+                else:
+                    continue
+                return _format_ddmmyy(parsed)
+            except Exception:
+                continue
+    return None
+
+def _pick_date_for_output(file_name: str, created_time_iso: Optional[str]) -> str:
     """
-    Ensure scores are valid 1..10 strings, default to '2' if missing,
-    compute Total Score and % Score strings.
+    Priority:
+    1) date in filename (various formats)
+    2) Drive createdTime
+    3) "NA"
+    Always output dd/mm/yy
     """
-    fixed: List[int] = []
-    for k in SCORE_KEYS:
-        val = _to_int_or_none(row.get(k, ""))
-        if val is None:
-            val = 2  # your rule: minimum if missing/unclear
-        # clamp
-        val = max(1, min(10, val))
-        row[k] = str(val)
-        fixed.append(val)
-
-    total = sum(fixed)
-    row["Total Score"] = str(total)
-
-    pct = round((total / 50.0) * 100.0, 1)
-    # normalize as string with percent sign
-    row["% Score"] = f"{pct}%"
-
-    # Overall Sentiment default if missing
-    if not row.get("Overall Sentiment") or row["Overall Sentiment"].strip().upper() == "N/A":
-        # crude heuristic: choose Neutral if no strong signal
-        row["Overall Sentiment"] = "Neutral"
-
-
-# ----------------------------------
-# Config helpers (Manager mapping)
-# ----------------------------------
-def _fill_manager_info(row: Dict[str, str], owner_name: str, config: dict) -> None:
-    """
-    Fill Manager, Team, Manager Email from config.manager_map if available.
-    """
-    try:
-        mgr_map: Dict[str, Dict[str, str]] = config.get("manager_map", {})
-        # case-insensitive key match
-        key = None
-        for k in mgr_map.keys():
-            if k.lower() == (owner_name or "").lower():
-                key = k
-                break
-
-        if key:
-            info = mgr_map[key]
-            if not row.get("Manager") or row["Manager"].strip().upper() == "N/A":
-                row["Manager"] = str(info.get("Manager", "N/A") or "N/A")
-            if not row.get("Team") or row["Team"].strip().upper() == "N/A":
-                row["Team"] = str(info.get("Team", "N/A") or "N/A")
-            if not row.get("Manager Email") or row["Manager Email"].strip().upper() == "N/A":
-                row["Manager Email"] = str(info.get("Email", "N/A") or "N/A")
-    except Exception as e:
-        logging.debug(f"Manager map fill skipped: {e}")
-
-
-# ----------------------------------
-# Normalize to 47 headers
-# ----------------------------------
-def _normalize_to_headers(data: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Map arbitrary model JSON to our exact 47 headers.
-    Convert everything to strings and fill missing with 'N/A'.
-    """
-    normalized: Dict[str, str] = {}
-    for h in sheets.DEFAULT_HEADERS:
-        val = data.get(h, "N/A")
+    from_name = _extract_date_from_name(file_name)
+    if from_name:
+        return from_name
+    if created_time_iso:
         try:
-            s = str(val).strip()
-            normalized[h] = s if s else "N/A"
+            # createdTime like "2025-09-18T12:34:56.000Z"
+            d = dt.datetime.fromisoformat(created_time_iso.replace("Z", "+00:00")).date()
+            return _format_ddmmyy(d)
         except Exception:
-            normalized[h] = "N/A"
-    return normalized
+            pass
+    return "NA"
 
+# ---------- Duration extraction ----------
 
-# ----------------------------------
-# Transcription
-# ----------------------------------
-def transcribe_audio(file_path: str, config: dict) -> str:
+def _millis_to_minutes(ms: int) -> str:
+    mins = int(round(ms / 60000.0))
+    return f"{mins}"
+
+def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: str) -> str:
     """
-    Transcribe with Faster-Whisper and auto-translate to English.
+    Prefers Drive videoMediaMetadata.durationMillis (videos).
+    Basic fallbacks for a few audio types; otherwise NA.
+    Returns only minutes (integer string).
     """
-    model_size = config["analysis"].get("whisper_model", "small")
-    device = config["analysis"].get("whisper_device", "cpu")
-    compute_type = "int8" if device == "cpu" else "float16"
+    vmeta = meta.get("videoMediaMetadata") or {}
+    dur_ms = vmeta.get("durationMillis")
+    if isinstance(dur_ms, (int, float)) and dur_ms > 0:
+        return _millis_to_minutes(int(dur_ms))
 
-    logging.info(f"Loading faster-whisper: {model_size} on {device}")
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-
-    # Translate → English so the prompt is stable across languages
-    logging.info("Processing audio with Faster-Whisper (task=translate, beam_size=3)")
-    segments, info = model.transcribe(
-        file_path,
-        task="translate",
-        beam_size=3,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-    )
-
-    if info and getattr(info, "language", None):
+    # If it's audio, attempt a light fallback for WAV
+    if mime_type.startswith("audio/"):
         try:
-            logging.info(
-                f"Detected language '{info.language}' with probability "
-                f"{getattr(info, 'language_probability', 0):.2f}"
-            )
+            if local_path.lower().endswith(".wav"):
+                import wave
+                with wave.open(local_path, "rb") as w:
+                    frames = w.getnframes()
+                    rate = w.getframerate()
+                    seconds = frames / float(rate)
+                    return f"{int(round(seconds / 60.0))}"
         except Exception:
-            logging.info(f"Detected language '{info.language}'")
-
-    text_chunks = [seg.text for seg in segments]
-    transcript = " ".join(text_chunks).strip()
-
-    if not transcript:
-        logging.warning("Transcription produced empty text.")
-    else:
-        logging.info(f"SUCCESS: Transcribed {len(transcript.split())} words.")
-    return transcript
-
-
-# ----------------------------------
-# LLM calls
-# ----------------------------------
-def _call_gemini(prompt: str, transcript: str, model_name: str) -> str:
-    genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-    model = genai.GenerativeModel(model_name)
-    resp = model.generate_content(prompt.replace("{transcript}", transcript))
-    text = getattr(resp, "text", None)
-    if not text and getattr(resp, "candidates", None):
-        parts = getattr(resp.candidates[0], "content", None)
-        if parts and getattr(parts, "parts", None):
-            text = "".join(getattr(p, "text", "") for p in parts.parts)
-    if not text:
-        raise ValueError("Gemini returned empty text")
-    return text.strip()
-
-
-def _call_openrouter(prompt: str, transcript: str, model_name: str) -> str:
-    from openai import OpenAI
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise ValueError("OPENROUTER_API_KEY not set")
-
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
-    completion = client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt.replace("{transcript}", transcript)}],
-        temperature=0.2,
-    )
-    return completion.choices[0].message.content.strip()
-
-
-def analyze_transcript(transcript: str, owner_name: str, config: dict) -> Dict[str, str]:
-    """
-    Use Gemini (fallback OpenRouter) → robust JSON parse →
-    normalize to 47 headers → repair/compute scores → enrich metadata.
-    """
-    if not transcript.strip():
-        # Empty transcript → all N/A, but still compute scores (they’ll become min)
-        row = _normalize_to_headers({})
-        _sanitize_and_compute_scores(row)
-        return row
-
-    prompt = _load_prompt(owner_name)
-
-    # 1) Gemini first
-    parsed: Dict[str, Any] | None = None
-    try:
-        model_name = config["analysis"].get("gemini_model", "gemini-1.5-flash")
-        raw = _call_gemini(prompt, transcript, model_name)
-        parsed = _clean_and_parse_json(raw)
-        logging.info("SUCCESS: Parsed AI analysis JSON output (Gemini).")
-    except Exception as e:
-        logging.error(f"Gemini failed, trying OpenRouter: {e}")
-
-    # 2) Fallback to OpenRouter
-    if parsed is None:
-        try:
-            or_model = config["analysis"].get(
-                "openrouter_model_name", "nousresearch/nous-hermes-2-mistral-7b-dpo"
-            )
-            raw = _call_openrouter(prompt, transcript, or_model)
-            parsed = _clean_and_parse_json(raw)
-            logging.info("SUCCESS: Parsed AI analysis JSON output (OpenRouter).")
-        except Exception as e2:
-            logging.error(f"OpenRouter also failed. Returning all N/A. Error: {e2}")
-            row = _normalize_to_headers({})
-            _sanitize_and_compute_scores(row)
-            return row
-
-    # Normalize to headers
-    row = _normalize_to_headers(parsed)
-
-    # Enrich / repair
-    # Owner name (force)
-    if not row.get("Owner (Who handled the meeting)") or row["Owner (Who handled the meeting)"].strip().upper() == "N/A":
-        row["Owner (Who handled the meeting)"] = owner_name or "N/A"
-
-    # Filename heuristics for Society/Type/Date/etc.
-    # (We’ll fill this at process_single_file stage because we know file_name there.)
-
-    # Fix/compute scores (+ Total, %)
-    _sanitize_and_compute_scores(row)
-
-    # Ensure % fields look like percent
-    pct_s = row.get("% Score", "").strip()
-    if pct_s and not pct_s.endswith("%"):
-        try:
-            # if it's a number string, append %
-            float(pct_s)
-            row["% Score"] = pct_s + "%"
-        except Exception:
-            # leave as-is
             pass
 
-    return row
+    # As a last resort, NA (we avoid heavy deps like ffprobe here)
+    return "NA"
 
+# ---------- ERP/ASP coverage & missed-opps ----------
 
-# ----------------------------------
-# Main: process a single file
-# ----------------------------------
-def process_single_file(drive_service, gsheets, file_meta, member_name: str, config: dict):
+def _normalize_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip().lower()
+
+def _match_coverage(transcript: str, feature_map: Dict[str, List[str]]) -> Tuple[Set[str], Set[str]]:
+    text = _normalize_text(transcript)
+    covered, missed = set(), set()
+    for feature, keys in feature_map.items():
+        hit = any(k in text for k in keys)
+        if hit:
+            covered.add(feature)
+        else:
+            missed.add(feature)
+    return covered, missed
+
+def _build_feature_summary(covered_all: Set[str], total: int, label: str) -> str:
+    pct = 0 if total == 0 else int(round(100 * len(covered_all) / total))
+    covered_list = sorted(covered_all)
+    head = f"{label} Coverage: {len(covered_all)}/{total} ({pct}%)."
+    if covered_list:
+        head += " Covered: " + ", ".join(covered_list) + "."
+    return head
+
+def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
+    erp_cov, erp_missed = _match_coverage(transcript, ERP_FEATURES)
+    asp_cov, asp_missed = _match_coverage(transcript, ASP_FEATURES)
+
+    # Feature Checklist Coverage (short summary)
+    coverage_parts = []
+    coverage_parts.append(_build_feature_summary(erp_cov, len(ERP_FEATURES), "ERP"))
+    coverage_parts.append(_build_feature_summary(asp_cov, len(ASP_FEATURES), "ASP"))
+    feature_coverage_summary = " ".join(coverage_parts)
+
+    # Missed Opportunities — combine important items not discussed
+    # Prioritize higher-impact items near the top
+    priority = [
+        "Tally import/export", "Bank reconciliation", "UPI/cards gateway",
+        "Defaulter tracking", "PO / WO approvals", "Inventory",
+        "Managed accounting (bills & receipts)", "Bank reconciliation + suspense",
+        "Financial reports (non-audited)", "Dedicated remote accountant"
+    ]
+    missed_all = list(sorted(erp_missed.union(asp_missed)))
+    # Reorder by priority first, then others
+    missed_sorted = sorted(missed_all, key=lambda x: (0 if x in priority else 1, priority.index(x) if x in priority else 999, x))
+
+    missed_text = ", ".join(missed_sorted) if missed_sorted else ""
+    return feature_coverage_summary, missed_text
+
+# ---------- Gemini calls ----------
+
+def _get_model(config: Dict[str, Any]) -> str:
+    return config.get("google_llm", {}).get("model", "gemini-1.5-flash")
+
+def _get_analysis_model(config: Dict[str, Any]) -> str:
+    return config.get("google_llm", {}).get("analysis_model", _get_model(config))
+
+def _load_master_prompt(config: Dict[str, Any]) -> str:
+    # Prefer prompt.txt alongside repo; else config; else fallback
+    prompt_path = os.path.join(os.getcwd(), "prompt.txt")
+    if os.path.exists(prompt_path):
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return config.get("google_llm", {}).get("schema_prompt", """
+Act as an expert business analyst for society-management ERP & ASP meetings.
+Strictly return a single JSON object (no prose outside JSON).
+If a field is unknown, set it to "" (empty string).
+""").strip()
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=20),
+    retry=retry_if_exception_type((QuotaExceeded, RuntimeError))
+)
+def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
+    try:
+        model = genai.GenerativeModel(model_name)
+        uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
+        prompt = "Transcribe the audio verbatim with punctuation. Do not summarize. Output plain text only."
+        resp = model.generate_content([uploaded, {"text": prompt}])
+        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
+            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+        text = (resp.text or "").strip()
+        if not text:
+            raise RuntimeError("Empty transcript from Gemini.")
+        return text
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ["quota", "rate limit", "resourceexhausted"]):
+            raise QuotaExceeded(msg)
+        raise
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=20),
+    retry=retry_if_exception_type((QuotaExceeded, RuntimeError))
+)
+def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dict[str, Any]:
+    try:
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(
+            [
+                {"text": master_prompt},
+                {"text": "\n\n---\nMEETING TRANSCRIPT:\n"},
+                {"text": transcript},
+            ],
+            generation_config={
+                "temperature": 0.2,
+                "response_mime_type": "application/json",
+            },
+        )
+        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
+            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+        raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise RuntimeError("Analysis output is not a JSON object.")
+        return data
+    except json.JSONDecodeError as je:
+        raise RuntimeError(f"Failed to parse JSON from model: {je}") from je
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ["quota", "rate limit", "resourceexhausted"]):
+            raise QuotaExceeded(msg)
+        raise
+
+# ---------- Sheets I/O ----------
+
+def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, duration_min: str,
+                   feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any], config: Dict[str, Any]):
+    import sheets  # your local module
+
+    # Ensure the four fields are present / overwritten in the JSON that goes to your "Results" tab
+    analysis_obj["Date"] = date_out                 # dd/mm/yy or "NA"
+    analysis_obj["Meeting duration (min)"] = duration_min  # mins string, e.g., "30"
+    analysis_obj["Feature Checklist Coverage"] = feature_coverage
+    analysis_obj["Missed Opportunities"] = missed_opps
+
+    # 1) mark the ledger row
+    status_note = f"Processed via Gemini; duration={duration_min}m"
+    sheets.update_ledger(gsheets_sheet, file_id, "Processed", status_note, config, file_name)
+
+    # 2) append the structured analysis row
+    if hasattr(sheets, "append_result"):
+        sheets.append_result(gsheets_sheet, analysis_obj, config)
+    elif hasattr(sheets, "append_json"):
+        sheets.append_json(gsheets_sheet, analysis_obj, config)
+    elif hasattr(sheets, "append_raw"):
+        sheets.append_raw(gsheets_sheet, json.dumps(analysis_obj, ensure_ascii=False), config)
+
+# =========================
+# Entry point (called by main.py)
+# =========================
+
+def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
-    download → transcribe → analyze → fill fallbacks → write to Sheets → move to Processed
-    On failure, move to Quarantined and log to ledger.
+    Orchestrates: metadata -> download -> transcribe -> analyze -> enrich -> write sheets.
+    Exceptions are allowed to bubble so main.py can quarantine & stop on quota.
     """
-    from gdrive import download_file
+    _init_gemini()
 
     file_id = file_meta["id"]
-    file_name = file_meta.get("name", "Unknown")
+    meta = _drive_get_metadata(drive_service, file_id)
+    file_name = meta.get("name", file_meta.get("name", "Unknown Filename"))
+    mime_type = meta.get("mimeType", file_meta.get("mimeType", ""))
+    created_iso = meta.get("createdTime")
 
-    try:
-        logging.info(f"Downloading file: {file_name}")
-        local_path = download_file(drive_service, file_id, file_name)
+    logging.info(f"[Gemini-only] Processing: {file_name} ({mime_type})")
 
-        # Step 1: Transcription (multilingual → English)
-        transcript = transcribe_audio(local_path, config)
+    # --- Date selection & formatting (dd/mm/yy) ---
+    date_out = _pick_date_for_output(file_name, created_iso)
 
-        # Step 2: LLM analysis
-        row = analyze_transcript(transcript, member_name, config)
+    # --- Download (needed for transcription + some duration fallbacks) ---
+    tmp_dir = config.get("runtime", {}).get("tmp_dir", "/tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    local_path = os.path.join(tmp_dir, f"{file_id}_{file_name}".replace("/", "_"))
+    if not _is_media_supported(mime_type):
+        logging.info("MIME type not reliable; still downloading and proceeding.")
+    _, _ = _download_drive_file(drive_service, file_id, local_path)
 
-        # Step 3: Fallbacks from filename (fill only where N/A)
-        inferred = _infer_from_filename(file_name)
-        for k, v in inferred.items():
-            if row.get(k, "N/A").strip().upper() in ("", "N/A"):
-                row[k] = v
+    # --- Duration (minutes) ---
+    duration_min = _probe_duration_minutes(meta, local_path, mime_type)
 
-        # Step 4: Manager/Team details from config
-        _fill_manager_info(row, member_name, config)
+    # --- Transcribe ---
+    transcript = _gemini_transcribe(local_path, mime_type, _get_model(config))
+    logging.info(f"Transcript length: {len(transcript)} chars")
 
-        # Extra traceability in sheet
-        row["Media Link"] = file_name or "N/A"
+    # --- Local, deterministic ERP/ASP coverage + missed opps ---
+    feature_coverage, missed_opps = _feature_coverage_and_missed(transcript)
 
-        # Step 5: Write to Google Sheets
-        sheets.write_analysis_result(gsheets, row, config)
+    # --- Analyze with your master prompt (JSON out) ---
+    master_prompt = _load_master_prompt(config)
+    analysis_obj = _gemini_analyze(transcript, master_prompt, _get_analysis_model(config))
 
-        # Step 6: Move to Processed (best-effort retries are inside move_to_processed)
-        try:
-            move_to_processed(drive_service, file_id, config)
-        except Exception as e_move:
-            logging.warning(f"Processed successfully, but could not move to Processed: {e_move}")
+    # Ensure headers we care about exist even if model omitted them
+    analysis_obj.setdefault("Date", "")
+    analysis_obj.setdefault("Meeting duration (min)", "")
+    analysis_obj.setdefault("Feature Checklist Coverage", "")
+    analysis_obj.setdefault("Missed Opportunities", "")
 
-        # Step 7: Ledger success
-        try:
-            sheets.update_ledger(gsheets, file_id, "Processed", "", config, file_name)
-        except Exception as e_ledger:
-            logging.warning(f"Processed but could not update ledger: {e_ledger}")
+    # --- Write ---
+    _write_success(
+        gsheets_sheet=gsheets_sheet,
+        file_id=file_id,
+        file_name=file_name,
+        date_out=date_out,
+        duration_min=duration_min,
+        feature_coverage=feature_coverage,
+        missed_opps=missed_opps,
+        analysis_obj=analysis_obj,
+        config=config,
+    )
 
-        logging.info(f"SUCCESS: Completed processing of {file_name}")
-
-    except Exception as e:
-        logging.error(f"ERROR processing {file_name}: {e}")
-
-        # Quarantine (best-effort)
-        try:
-            quarantine_file(
-                drive_service,
-                file_id,
-                file_meta.get("parents", [""])[0] if file_meta.get("parents") else "",
-                str(e),
-                config,
-            )
-        except Exception as qe:
-            logging.error(f"Could not quarantine file {file_name}: {qe}")
-
-        # Ledger failure
-        try:
-            sheets.update_ledger(gsheets, file_id, "Failed", str(e), config, file_name)
-        except Exception as e_ledger:
-            logging.error(f"ERROR updating ledger for file {file_name}: {e_ledger}")
-
-        # Re-raise so main logs “Unhandled error …”
-        raise
+    logging.info(f"SUCCESS: Processed {file_name} (date={date_out}, duration={duration_min}m)")
