@@ -65,8 +65,8 @@ manager_map:
   Musthafa: { Manager: "Dipesh", Team: "Emerging City", Email: "mustafa.hatimbhai@nobroker.in" }
   Yash: { Manager: "Dipesh", Team: "Greater Mumbai", Email: "yash.anand@nobroker.in" }
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
-  Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
-  Dipesh: { Manager: "Self", Team: "Management", Email: "dipesh.karale@nobroker.in" }
+  Saleem: { Manager: "Pratik", Team: "Management", Email: "saleem.hk@nobroker.in" }
+  Dipesh: { Manager: "Pratik", Team: "Management", Email: "dipesh.karale@nobroker.in" }
 
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
