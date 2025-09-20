@@ -1,5 +1,5 @@
 # ===================================================================
-# CONFIGURATION FILE for Meeting Analysis Bot v5 (Google LLM–only)
+# CONFIGURATION FILE — Meeting Analysis Bot v5 (Gemini-only)
 # ===================================================================
 
 google_drive:
@@ -12,7 +12,44 @@ google_sheets:
   results_tab_name: "Analysis Results"
   ledger_tab_name: "Processed Ledger"
 
-# Maps team member folder name → default Manager/Team/Email (KEEP THIS)
+# -------------------------
+# Google LLM (Gemini)
+# -------------------------
+google_llm:
+  # Primary model for both transcription & analysis. (Flash is fast & economical)
+  model: "gemini-1.5-flash"
+  # Optional: if omitted, analysis falls back to "model" above
+  # analysis_model: "gemini-1.5-flash"
+  # Keep 1-call-per-file to reduce quota usage (can override via GEMINI_ONE_SHOT=0/1)
+  one_shot: true
+  # Optional: If prompt.txt is missing, we'll use this inline schema prompt (leave blank to rely on file)
+  # schema_prompt: ""
+
+# -------------------------
+# Processing controls
+# -------------------------
+processing:
+  # Safety cap to avoid huge runs in one go; set high if you want no practical cap
+  max_files_per_run: 999999
+  # Small delay between files to avoid RPM spikes (seconds)
+  sleep_between_files_sec: 0.0
+
+# -------------------------
+# Quarantine behavior
+# -------------------------
+quarantine:
+  # After this cool-off window, quarantined files get moved back for automatic retry
+  auto_retry_after_hours: 24
+
+# -------------------------
+# Runtime paths
+# -------------------------
+runtime:
+  tmp_dir: "/tmp"
+
+# -------------------------
+# Manager enrichment (used to auto-fill Owner/Manager/Team/Emails)
+# -------------------------
 manager_map:
   Sripal: { Manager: "Saleem", Team: "Chennai", Email: "sripal.r@nobroker.in" }
   Sharath: { Manager: "Saleem", Team: "Bangalore", Email: "sharath.k@nobroker.in" }
@@ -31,28 +68,13 @@ manager_map:
   Saleem: { Manager: "Self", Team: "Management", Email: "saleem.hk@nobroker.in" }
   Dipesh: { Manager: "Self", Team: "Management", Email: "dipesh.karale@nobroker.in" }
 
-# Used by weekly digest emails (KEEP THIS)
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
   Pratik: "pratik.ray@nobroker.in"
 
-# Google LLM settings (REPLACES old 'analysis:' whisper/openrouter keys)
-google_llm:
-  model: "gemini-1.5-flash"       # transcription
-  analysis_model: "gemini-1.5-pro" # JSON analysis
-  schema_prompt: |
-    Act as an expert business analyst for society-management ERP & ASP meetings.
-    Return a single valid JSON object. If a field is unknown, set "N/A".
-    Keep writing concise and business-friendly.
-
-# Quarantine re-try window (used by main.py’s retry_quarantined_files)
-quarantine:
-  auto_retry_after_hours: 6
-
-runtime:
-  tmp_dir: "/tmp"
-
+# -------------------------
+# Optional feature: weekly digest (not required by the core run)
+# -------------------------
 weekly_digest:
   enabled: true
-  last_n_days: 7
