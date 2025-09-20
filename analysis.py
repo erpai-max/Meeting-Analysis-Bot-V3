@@ -401,12 +401,12 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
     status_note = f"Processed via Gemini; duration={duration_min}m"
     sheets.update_ledger(gsheets_sheet, file_id, "Processed", status_note, config, file_name)
 
-    if hasattr(sheets, "append_result"):
-        sheets.append_result(gsheets_sheet, analysis_obj, config)
-    elif hasattr(sheets, "append_json"):
-        sheets.append_json(gsheets_sheet, analysis_obj, config)
-    elif hasattr(sheets, "append_raw"):
-        sheets.append_raw(gsheets_sheet, json.dumps(analysis_obj, ensure_ascii=False), config)
+    # Write the actual row to "Analysis Results"
+    if hasattr(sheets, "write_analysis_result"):
+        sheets.write_analysis_result(gsheets_sheet, analysis_obj, config)
+    else:
+        # Fallback: best-effort log (keeps run going even if sheets module is custom)
+        logging.warning("sheets.write_analysis_result not found; results row not appended.")
 
 # =========================
 # Entry point
