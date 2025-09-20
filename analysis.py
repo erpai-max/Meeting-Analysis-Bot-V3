@@ -207,6 +207,15 @@ def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: st
 
     return "NA"
 
+# ---------- Society name from file name ----------
+def _society_from_filename(name: str) -> str:
+    """Derive Society Name from file name (drop extension, tidy separators)."""
+    base = os.path.splitext(name or "")[0]
+    # Replace common separators with spaces and collapse whitespace
+    base = base.replace("_", " ").replace("-", " ").replace(".", " ").strip()
+    base = " ".join(base.split())
+    return base or "Unknown"
+
 # ---------- ERP/ASP coverage & missed-opps ----------
 def _normalize_text(s: str) -> str:
     import re as _re
@@ -367,20 +376,18 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
 def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]) -> None:
     """
     Fill Owner/Email/Manager/Team/Manager Email using config.manager_map / manager_emails.
-    Does not override if already present in analysis_obj.
+    We OVERRIDE to ensure correctness based on folder ownership.
     """
+    analysis_obj["Owner (Who handled the meeting)"] = member_name or ""
     try:
-        m = (config.get("manager_map") or {}).get(member_name)
-        if m:
-            analysis_obj.setdefault("Owner (Who handled the meeting)", member_name)
-            analysis_obj.setdefault("Email Id", m.get("Email", ""))
-            analysis_obj.setdefault("Manager", m.get("Manager", ""))
-            analysis_obj.setdefault("Team", m.get("Team", ""))
-            mgr_email = (config.get("manager_emails") or {}).get(m.get("Manager", ""), "")
-            analysis_obj.setdefault("Manager Email", mgr_email)
-        else:
-            analysis_obj.setdefault("Owner (Who handled the meeting)", member_name)
+        m = (config.get("manager_map") or {}).get(member_name, {})
+        analysis_obj["Email Id"] = m.get("Email", "") or analysis_obj.get("Email Id", "")
+        analysis_obj["Manager"] = m.get("Manager", "") or analysis_obj.get("Manager", "")
+        analysis_obj["Team"] = m.get("Team", "") or analysis_obj.get("Team", "")
+        mgr_email = (config.get("manager_emails") or {}).get(m.get("Manager", ""), "")
+        analysis_obj["Manager Email"] = mgr_email or analysis_obj.get("Manager Email", "")
     except Exception:
+        # still ensure owner is set even if mapping lookup fails
         pass
 
 # ---------- Sheets I/O ----------
@@ -396,6 +403,7 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
     if missed_opps:
         analysis_obj["Missed Opportunities"] = missed_opps
 
+    # Ensure enrichment is applied (idempotent override)
     _augment_with_manager_info(analysis_obj, member_name, config)
 
     status_note = f"Processed via Gemini; duration={duration_min}m"
@@ -405,7 +413,6 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
     if hasattr(sheets, "write_analysis_result"):
         sheets.write_analysis_result(gsheets_sheet, analysis_obj, config)
     else:
-        # Fallback: best-effort log (keeps run going even if sheets module is custom)
         logging.warning("sheets.write_analysis_result not found; results row not appended.")
 
 # =========================
@@ -455,6 +462,10 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
             # Real quota → bubble up to main to stop run
             raise
         analysis_obj = _gemini_analyze(transcript, master_prompt, _get_analysis_model(config))
+
+    # ---- Force key outputs based on your rule ----
+    analysis_obj["Society Name"] = _society_from_filename(file_name)
+    _augment_with_manager_info(analysis_obj, member_name, config)
 
     # Deterministic coverage/missed-opps
     feature_coverage, missed_opps = ("", "")
