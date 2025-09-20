@@ -24,6 +24,30 @@ class QuotaExceeded(Exception):
     pass
 
 # =========================
+# Quota detection helper (strict)
+# =========================
+def _is_quota_error(e: Exception) -> bool:
+    """
+    Return True only for genuine quota/rate-limit cases (HTTP 429 / ResourceExhausted).
+    We DO NOT treat long transcripts, token sizes, or generic errors as quota.
+    """
+    msg = str(e).lower()
+    # If google.api_core is present, prefer the typed exception
+    try:
+        from google.api_core.exceptions import ResourceExhausted
+        if isinstance(e, ResourceExhausted):
+            return True
+    except Exception:
+        pass
+
+    keywords = [
+        "resourceexhausted", "resource exhausted",
+        "quota exceeded", "quota", "too many requests",
+        "rate limit", "rate-limit", "429"
+    ]
+    return any(k in msg for k in keywords)
+
+# =========================
 # Constants & Feature Maps
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
@@ -229,7 +253,7 @@ def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
     missed_text = ", ".join(missed_sorted) if missed_sorted else ""
     return feature_coverage_summary, missed_text
 
-# ---------- Gemini calls ----------
+# ---------- Gemini config & calls ----------
 def _get_model(config: Dict[str, Any]) -> str:
     return config.get("google_llm", {}).get("model", "gemini-1.5-flash")
 
@@ -269,9 +293,9 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
             raise RuntimeError("Empty transcript from Gemini.")
         return text
     except Exception as e:
-        msg = str(e).lower()
-        if any(k in msg for k in ["quota", "rate limit", "resourceexhausted"]):
-            raise QuotaExceeded(msg)
+        if _is_quota_error(e):
+            logging.error("Quota exceeded during TRANSCRIBE call.")
+            raise QuotaExceeded(str(e))
         raise
 
 @retry(
@@ -304,9 +328,9 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
     except json.JSONDecodeError as je:
         raise RuntimeError(f"Failed to parse JSON from model: {je}") from je
     except Exception as e:
-        msg = str(e).lower()
-        if any(k in msg for k in ["quota", "rate limit", "resourceexhausted"]):
-            raise QuotaExceeded(msg)
+        if _is_quota_error(e):
+            logging.error("Quota exceeded during ANALYZE call.")
+            raise QuotaExceeded(str(e))
         raise
 
 @retry(
@@ -340,9 +364,9 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
     except json.JSONDecodeError as je:
         raise RuntimeError(f"Failed to parse JSON from one-shot model: {je}") from je
     except Exception as e:
-        msg = str(e).lower()
-        if any(k in msg for k in ["quota", "rate limit", "resourceexhausted"]):
-            raise QuotaExceeded(msg)
+        if _is_quota_error(e):
+            logging.error("Quota exceeded during ONE-SHOT call.")
+            raise QuotaExceeded(str(e))
         raise
 
 # ---------- Manager info enrichment ----------
@@ -363,7 +387,6 @@ def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, c
         else:
             analysis_obj.setdefault("Owner (Who handled the meeting)", member_name)
     except Exception:
-        # never break the run for metadata enrichment
         pass
 
 # ---------- Sheets I/O ----------
@@ -408,6 +431,7 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
     created_iso = meta.get("createdTime")
 
     logging.info(f"[Gemini-only] Processing: {file_name} ({mime_type})")
+    logging.info(f"One-shot mode: {config.get('google_llm', {}).get('one_shot', False)}")
 
     # Date (dd/mm/yy)
     date_out = _pick_date_for_output(file_name, created_iso)
@@ -430,8 +454,12 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
         analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, _get_analysis_model(config))
         transcript = analysis_obj.get("transcript_full", "")
     else:
-        transcript = _gemini_transcribe(local_path, mime_type, _get_model(config))
-        logging.info(f"Transcript length: {len(transcript)} chars")
+        try:
+            transcript = _gemini_transcribe(local_path, mime_type, _get_model(config))
+            logging.info(f"Transcript length: {len(transcript)} chars")
+        except QuotaExceeded:
+            # real quota → bubble up to main to stop run
+            raise
         analysis_obj = _gemini_analyze(transcript, master_prompt, _get_analysis_model(config))
 
     # Deterministic coverage/missed-opps
@@ -440,7 +468,6 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
         if transcript:
             feature_coverage, missed_opps = _feature_coverage_and_missed(transcript)
         else:
-            # fallback: if model already provided these, keep them
             feature_coverage = analysis_obj.get("Feature Checklist Coverage", "")
             missed_opps = analysis_obj.get("Missed Opportunities", "")
     except Exception:
