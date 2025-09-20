@@ -91,6 +91,30 @@ def retry_quarantined_files(drive_service, gsheets_sheet, config):
     except Exception as e:
         logging.error(f"ERROR while retrying quarantined files: {e}")
 
+# ---------- Pre-run quota probe ----------
+def _probe_gemini_quota_ok(model_name: str) -> bool:
+    """
+    Fire a tiny request to detect RPD/RPM exhaustion early.
+    Returns False on 429/quota errors; True otherwise.
+    """
+    try:
+        import google.generativeai as genai
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            logging.warning("GEMINI_API_KEY not set; skipping quota probe.")
+            return True
+        genai.configure(api_key=api_key)
+        genai.GenerativeModel(model_name).generate_content("ping")
+        return True
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ["429", "quota", "resourceexhausted", "rate limit", "too many requests"]):
+            logging.error("Gemini quota/rate-limit appears exhausted (probe).")
+            return False
+        # Other errors: don't block the run
+        logging.warning(f"Quota probe non-fatal error: {e}")
+        return True
+
 def main():
     logging.info("--- Starting Meeting Analysis Bot v5 (Google LLM–only) ---")
 
@@ -112,6 +136,12 @@ def main():
     max_files = int(proc_conf.get("max_files_per_run", 999999))
     per_file_sleep = float(proc_conf.get("sleep_between_files_sec", 0.0))
     processed_this_run = 0
+
+    # Pre-run quota probe (avoid wasting a file if RPD is already zero)
+    model_for_probe = (config.get("google_llm") or {}).get("model", "gemini-1.5-flash")
+    if not _probe_gemini_quota_ok(model_for_probe):
+        logging.error("Quota exhausted now; ending this run early.")
+        sys.exit(0)
 
     drive_service, gsheets_sheet = authenticate_google(config)
     if not drive_service or not gsheets_sheet:
