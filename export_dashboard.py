@@ -1,38 +1,56 @@
 # export_dashboard.py
-import os, json, yaml, gspread
-from google.oauth2 import service_account
+import os
+import json
+import yaml
+import logging
+import shutil
+
+import sheets  # uses your existing sheets.py
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def main():
     # Load config
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    sheet_id = config["google_sheets"]["sheet_id"]
-    results_tab = config["google_sheets"]["results_tab_name"]
+    # Authenticate Google Sheets (re-uses your sheets.py helper)
+    gs = sheets.authenticate_google_sheets(config)
 
-    # Auth with service account (same key you already use)
-    gcp_key_str = os.environ["GCP_SA_KEY"]
-    creds = service_account.Credentials.from_service_account_info(
-        json.loads(gcp_key_str),
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-    )
-    client = gspread.authorize(creds)
+    # Grab all rows from the Results tab
+    rows = sheets.get_all_results(gs, config)
 
-    ws = client.open_by_key(sheet_id).worksheet(results_tab)
-    rows = ws.get_all_records()
+    # Where to write
+    dash_cfg = config.get("dashboard", {}) or {}
+    out_dir = dash_cfg.get("output_dir", "docs")
+    out_name = dash_cfg.get("filename", "dashboard_data.json")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, out_name)
 
-    # Ensure site/ exists and write JSON there
-    os.makedirs("site", exist_ok=True)
-    with open("site/dashboard_data.json", "w", encoding="utf-8") as f:
+    # (Optional) strip sensitive fields before publishing
+    strip_cols = set(dash_cfg.get("strip_columns", []))
+    if strip_cols:
+        def clean_row(r):
+            return {k: v for k, v in r.items() if k not in strip_cols}
+        rows = [clean_row(r) for r in rows]
+
+    # Write pretty JSON for the dashboard
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
+    logging.info(f"Exported {len(rows)} records → {out_path}")
 
-    # Also copy dashboard.html (if stored at repo root) to site/
-    src = "dashboard.html"
-    if os.path.exists(src):
-        with open(src, "r", encoding="utf-8") as fr, open("site/dashboard.html", "w", encoding="utf-8") as fw:
-            fw.write(fr.read())
-
-    print(f"Exported {len(rows)} rows to site/dashboard_data.json")
+    # (Optional) copy dashboard.html at repo root → docs/index.html
+    if dash_cfg.get("copy_html_from_root", True):
+        src_html = "dashboard.html"
+        dest_html = os.path.join(out_dir, "index.html")
+        if os.path.exists(src_html):
+            shutil.copyfile(src_html, dest_html)
+            logging.info(f"Copied {src_html} → {dest_html}")
+        else:
+            logging.info("dashboard.html not found at repo root; skipping HTML copy.")
 
 if __name__ == "__main__":
+    # Requires env var: GCP_SA_KEY (service account JSON content)
+    if not os.environ.get("GCP_SA_KEY"):
+        raise SystemExit("GCP_SA_KEY env var missing. Set it to your service account JSON string.")
     main()
