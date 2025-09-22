@@ -78,3 +78,14 @@ manager_emails:
 # -------------------------
 weekly_digest:
   enabled: true
+
+dashboard:
+  output_dir: "docs"
+  filename: "dashboard_data.json"
+  copy_html_from_root: true   # copies dashboard.html → docs/index.html automatically
+  strip_columns:              # optional: remove sensitive fields from public JSON
+    - "Email Id"
+    - "Manager Email"
+    - "Media Link"
+    - "Doc Link"
+
