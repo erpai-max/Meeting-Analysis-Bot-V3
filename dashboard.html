@@ -1,86 +1,599 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Meeting Insights Dashboard</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#f6f7fb;}
-    .wrap{max-width:1200px;margin:20px auto;padding:16px;}
-    h1{margin:0 0 12px;}
-    .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;}
-    table{width:100%;border-collapse:collapse;font-size:13px;}
-    th,td{padding:8px 10px;border-bottom:1px solid #eee;}
-    th{position:sticky;top:0;background:#fafafa;}
-    .controls{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
-    input,select{padding:8px;border:1px solid #d1d5db;border-radius:8px;}
-    .pill{display:inline-block;padding:4px 8px;background:#eef2ff;border-radius:9999px;margin-right:6px;}
-  </style>
-</head>
-<body>
-<div class="wrap">
-  <h1>Meeting Insights Dashboard</h1>
-  <div class="card">
-    <div class="controls">
-      <input id="search" placeholder="Search (society, owner, manager, etc.)"/>
-      <select id="sent">
-        <option value="">Sentiment</option>
-        <option>Positive</option>
-        <option>Neutral</option>
-        <option>Negative</option>
-        <option>Mixed</option>
-      </select>
-    </div>
-    <div id="counts"></div>
-    <div style="overflow:auto; max-height:70vh;">
-      <table id="tbl">
-        <thead></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-</div>
-<script>
-  const HEADERS = [
-    "Date","POC Name","Society Name","Visit Type","Meeting Type","Amount Value","Months","Deal Status","Vendor Leads","Society Leads",
-    "Opening Pitch Score","Product Pitch Score","Cross-Sell / Opportunity Handling","Closing Effectiveness","Negotiation Strength","Rebuttal Handling",
-    "Overall Sentiment","Total Score","% Score","Risks / Unresolved Issues","Improvements Needed","Owner (Who handled the meeting)","Email Id","Kibana ID",
-    "Manager","Product Pitch","Team","Media Link","Doc Link","Suggestions & Missed Topics","Pre-meeting brief","Meeting duration (min)","Rapport Building",
-    "Improvement Areas","Product Knowledge Displayed","Call Effectiveness and Control","Next Step Clarity and Commitment","Missed Opportunities",
-    "Key Discussion Points","Key Questions","Competition Discussion","Action items","Positive Factors","Negative Factors","Customer Needs",
-    "Overall Client Sentiment","Feature Checklist Coverage","Manager Email"
-  ];
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Meeting Analysis Report System</title>
 
-  const thead = document.querySelector("#tbl thead");
-  const tbody = document.querySelector("#tbl tbody");
-  thead.innerHTML = "<tr>" + HEADERS.map(h=>`<th>${h}</th>`).join("") + "</tr>";
+<!-- UI & libs (CDN) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
-  let data = [];
-  fetch("dashboard_data.json")
-    .then(r=>r.json())
-    .then(rows => { data = rows; render(); });
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-  function render() {
-    const q = (document.getElementById("search").value||"").toLowerCase();
-    const s = document.getElementById("sent").value;
-
-    let rows = data.filter(r=>{
-      const joined = Object.values(r).join(" ").toLowerCase();
-      const qok = !q || joined.includes(q);
-      const sok = !s || r["Overall Sentiment"] === s || r["Overall Client Sentiment"] === s;
-      return qok && sok;
-    });
-
-    document.getElementById("counts").innerHTML =
-      `<span class="pill">Total: ${data.length}</span><span class="pill">Shown: ${rows.length}</span>`;
-
-    tbody.innerHTML = rows.map(r=>{
-      return "<tr>" + HEADERS.map(h=>`<td>${(r[h] ?? "")}</td>`).join("") + "</tr>";
-    }).join("");
+<style>
+  @keyframes gradient-animation{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+  :root{
+    --bg-start:#f5f7fa;--bg-end:#c3cfe2;--text-1:#1e293b;--text-2:#475569;--text-3:#64748b;
+    --card:rgba(255,255,255,.85);--card-brd:rgba(255,255,255,.2);--inp:#fff;--inp-text:#1e293b;--inp-brd:#cbd5e1;
+    --tab:rgba(226,232,240,.7);--tab-text:#334155;--grid:rgba(0,0,0,.1);--overlay:rgba(0,0,0,.5);
+    --chat-user:#dbeafe;--chat-bot:#e2e8f0
   }
+  .dark{
+    --bg-start:#0f172a;--bg-end:#334155;--text-1:#f1f5f9;--text-2:#cbd5e1;--text-3:#94a3b8;
+    --card:rgba(30,41,59,.6);--card-brd:rgba(255,255,255,.1);--inp:#334155;--inp-text:#f1f5f9;--inp-brd:#475569;
+    --tab:rgba(51,65,85,.7);--tab-text:#cbd5e1;--grid:rgba(71,85,105,.5);--overlay:rgba(0,0,0,.7);
+    --chat-user:#1e40af;--chat-bot:#334155
+  }
+  body{font-family:'Inter',sans-serif;background:linear-gradient(-45deg,var(--bg-start),var(--bg-end));background-size:400% 400%;animation:gradient-animation 15s ease infinite;color:var(--text-1);}
+  .card{background:var(--card);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--card-brd);border-radius:1rem;box-shadow:0 8px 32px rgba(0,0,0,.25)}
+  input,select,textarea{background:var(--inp)!important;color:var(--inp-text)!important;border-color:var(--inp-brd)!important}
+  .tab-btn{padding:.75rem 1.25rem;border-radius:9999px;font-weight:600;background:var(--tab);color:var(--tab-text);border:1px solid transparent}
+  .tab-btn.active{background:linear-gradient(to right,#0ea5e9,#2563eb);color:#fff;box-shadow:0 4px 14px rgba(0,118,255,.39)}
+  .tab{display:none}.tab.active{display:block}
+  .chart-wrap{position:relative;width:100%;height:400px;max-height:60vh}
+  .loader{border:4px solid #475569;border-top:4px solid #38bdf8;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite}
+  @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+  .modal{position:fixed;inset:0;display:none;justify-content:center;align-items:center;background:var(--overlay);z-index:50}
+  .modal.show{display:flex}
+  .kv{display:grid;grid-template-columns:160px 1fr;gap:.5rem .75rem}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;border:1px solid #28456e;color:#bfe1ff;background:#10233b}
+</style>
+</head>
+<body class="dark">
 
-  document.getElementById("search").addEventListener("input", render);
-  document.getElementById("sent").addEventListener("change", render);
+<div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+  <header class="mb-8 relative">
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+      <div>
+        <h1 class="text-3xl font-bold">Meeting Analysis Report System</h1>
+        <p class="text-[var(--text-2)]">Live dashboard from Google Sheet export</p>
+        <p id="updated" class="text-xs text-[var(--text-3)] mt-1">–</p>
+      </div>
+      <button id="theme" class="p-2 rounded-full card" title="Toggle theme">🌓</button>
+    </div>
+  </header>
+
+  <nav class="flex flex-wrap justify-center gap-2 md:gap-3 mb-6">
+    <button class="tab-btn active" data-tab="tab-summary">📈 Executive Summary</button>
+    <button class="tab-btn" data-tab="tab-team">🏆 Team & Product</button>
+    <button class="tab-btn" data-tab="tab-deal">💰 Deal Analysis</button>
+    <button class="tab-btn" data-tab="tab-individual">🚀 Individual Deep Dive</button>
+    <button class="tab-btn" data-tab="tab-risk">⚠️ Risk & Tools</button>
+  </nav>
+
+  <!-- Executive Summary -->
+  <section id="tab-summary" class="tab active">
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="card p-5 text-center"><div class="text-sm text-[var(--text-3)]">Total Pipeline</div><div id="k_pipe" class="text-3xl font-bold text-sky-400 mt-1">—</div></div>
+      <div class="card p-5 text-center"><div class="text-sm text-[var(--text-3)]">Avg % Score</div><div id="k_avg" class="text-3xl font-bold text-sky-400 mt-1">—</div></div>
+      <div class="card p-5 text-center"><div class="text-sm text-[var(--text-3)]">Total Meetings</div><div id="k_total" class="text-3xl font-bold text-sky-400 mt-1">—</div></div>
+      <div class="card p-5 text-center"><div class="text-sm text-[var(--text-3)]">Win / Lost / Open</div><div id="k_deals" class="text-3xl font-bold text-sky-400 mt-1">—</div></div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">Sales Funnel</h3>
+        <div id="funnel" class="flex items-center gap-3"></div>
+      </div>
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">Meetings by Type</h3>
+        <div class="chart-wrap"><canvas id="chartType"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Team & Product -->
+  <section id="tab-team" class="tab">
+    <div class="card p-5 mb-6">
+      <h3 class="font-semibold text-lg mb-3">🏆 Team Leaderboard</h3>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm">
+          <thead class="sticky top-0 bg-[var(--card)] border-b border-[var(--inp-brd)]">
+            <tr class="text-[var(--text-3)]">
+              <th class="p-2">Team</th><th class="p-2">Avg. % Score</th><th class="p-2">Meetings</th><th class="p-2">Pipeline (₹)</th>
+            </tr>
+          </thead>
+          <tbody id="teamBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">Performance by Product</h3>
+        <div class="chart-wrap"><canvas id="chartProduct"></canvas></div>
+      </div>
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">Visit Type Effectiveness</h3>
+        <div class="chart-wrap"><canvas id="chartVisit"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Deal Analysis -->
+  <section id="tab-deal" class="tab">
+    <div class="card p-5">
+      <h3 class="font-semibold text-lg mb-3">Deal Value vs. Meeting % Score</h3>
+      <p class="text-sm text-[var(--text-3)] mb-3">Checks correlation of meeting quality with value</p>
+      <div class="chart-wrap"><canvas id="chartScatter"></canvas></div>
+    </div>
+  </section>
+
+  <!-- Individual Deep Dive -->
+  <section id="tab-individual" class="tab">
+    <div class="card p-5 mb-6">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 items-center">
+        <select id="selOwner" class="p-3 rounded-lg border"></select>
+        <div class="flex gap-2 items-center">
+          <input id="start" type="date" class="p-2 rounded-lg border w-full">
+          <span class="text-[var(--text-3)]">to</span>
+          <input id="end" type="date" class="p-2 rounded-lg border w-full">
+        </div>
+        <select id="selStatus" class="p-3 rounded-lg border">
+          <option value="">All Deal Statuses</option>
+          <option>Pending</option><option>Live</option><option>Conflict</option><option>Win</option><option>Lost</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="indivKpis" class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6"></div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">🌟 Best Meeting</h3>
+        <div id="bestBox" class="text-sm"></div>
+      </div>
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">📋 Action Items (from notes)</h3>
+        <div id="actionsBox" class="text-sm"></div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">Common Improvement Areas</h3>
+        <ul id="listImprove" class="list-disc pl-5 text-sm space-y-1"></ul>
+      </div>
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">Key Strengths & Positives</h3>
+        <ul id="listPositive" class="list-disc pl-5 text-sm space-y-1"></ul>
+      </div>
+      <div class="card p-5">
+        <h3 class="font-semibold text-lg mb-3">Missed Opportunities</h3>
+        <ul id="listMissed" class="list-disc pl-5 text-sm space-y-1"></ul>
+      </div>
+    </div>
+
+    <div class="flex justify-center mt-8">
+      <button id="btnExcel" class="bg-sky-500 hover:bg-sky-600 text-white font-bold py-3 px-6 rounded-lg transition-colors shadow-lg">📥 Download Excel</button>
+    </div>
+  </section>
+
+  <!-- Risk & Tools -->
+  <section id="tab-risk" class="tab">
+    <div class="card p-5 mb-6">
+      <h3 class="font-semibold text-lg mb-3">Risk Dashboard</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+        <select id="riskOwner" class="p-3 rounded-lg border"><option value="">All Owners</option></select>
+        <select id="riskSociety" class="p-3 rounded-lg border"><option value="">All Societies</option></select>
+      </div>
+      <div class="overflow-x-auto max-h-96">
+        <table class="w-full text-left text-sm">
+          <thead class="sticky top-0 bg-[var(--card)] border-b border-[var(--inp-brd)]">
+            <tr class="text-[var(--text-3)]"><th class="p-2">Date</th><th class="p-2">Owner</th><th class="p-2">Society</th><th class="p-2">Risk / Issue</th></tr>
+          </thead>
+          <tbody id="riskBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Optional AI tools (safe by default; no keys on client) -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-lg mb-4">🤖 AI Tools (optional)</h3>
+      <p class="text-sm text-[var(--text-3)] mb-3">
+        Live AI is disabled on GitHub Pages to keep your API key private. If you want these buttons to work,
+        deploy a tiny proxy and set <code>window.GEMINI_PROXY_URL</code> (see comment in code).
+      </p>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div>
+          <h4 class="font-semibold mb-2">📝 Analyze Transcript (.txt)</h4>
+          <input type="file" id="fileTxt" accept=".txt" class="p-2 rounded border w-full mb-2">
+          <button id="btnAnalyze" class="bg-indigo-600 text-white px-4 py-2 rounded disabled:opacity-50" disabled>Analyze File</button>
+          <div id="loadAnalyze" class="hidden justify-center items-center py-4"><div class="loader"></div></div>
+          <div id="outAnalyze" class="mt-3 text-sm"></div>
+        </div>
+
+        <div>
+          <h4 class="font-semibold mb-2">📧 Draft Follow-up Email</h4>
+          <div class="flex gap-2 mb-2">
+            <select id="selMeeting" class="p-2 rounded border w-full"></select>
+            <button id="btnEmail" class="bg-blue-600 text-white px-4 py-2 rounded">Generate</button>
+          </div>
+          <div id="loadEmail" class="hidden justify-center items-center py-4"><div class="loader"></div></div>
+          <div id="outEmail" class="mt-3 text-sm"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Meeting modal -->
+<div id="modal" class="modal"><div class="card p-6 max-w-xl w-[92%]">
+  <div class="flex justify-between items-center mb-3">
+    <h2 id="mTitle" class="text-xl font-bold">Meeting</h2>
+    <button id="mClose" class="text-2xl leading-none">×</button>
+  </div>
+  <div id="mBody" class="kv text-sm"></div>
+</div></div>
+
+<script>
+/* =======================
+   Config (AI proxy opt-in)
+   =======================
+
+   If you want client-side AI buttons, deploy a tiny HTTPS endpoint that forwards requests to Gemini
+   and set this to your proxy URL (it should read {system, user} and return {text}).
+   Example: window.GEMINI_PROXY_URL = "https://your-cloud-function.example/run";
+*/
+window.GEMINI_PROXY_URL = ""; // leave blank to keep AI disabled on public pages
+
+/* ===== Utilities ===== */
+const INR = n => '₹ ' + Math.round(n).toLocaleString('en-IN');
+const num = v => {
+  if (v == null) return 0;
+  const m = String(v).replace(/₹/g,'').match(/-?\d[\d,]*\.?\d*/);
+  return m ? parseFloat(m[0].replace(/,/g,'')) : 0;
+};
+const pct = v => {
+  if (v == null || v === '') return NaN;
+  const s = String(v).trim();
+  let x = NaN;
+  if (s.endsWith('%')) x = parseFloat(s.replace('%',''));
+  else x = parseFloat(s);
+  return isFinite(x) ? x : NaN;
+};
+const by = k => (a,b)=> String(a[k]||'').localeCompare(String(b[k]||''));
+const uniq = (rows,key) => Array.from(new Set(rows.map(r => (r[key]||'').trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+const el = id => document.getElementById(id);
+const show = (id, on=true) => el(id).classList[on?'remove':'add']('hidden');
+
+/* ===== State ===== */
+let ALL = [];              // all rows from JSON
+let charts = {};           // chart instances
+
+/* ===== Load data ===== */
+async function loadData(){
+  const res = await fetch('dashboard_data.json', {cache:'no-store'});
+  ALL = await res.json();
+  el('updated').textContent = 'Updated ' + new Date().toLocaleString();
+}
+
+/* ===== Theme & Tabs ===== */
+function initTheme(){
+  const saved = localStorage.getItem('theme') || 'dark';
+  document.body.classList.toggle('dark', saved === 'dark');
+  el('theme').onclick = () => {
+    const dark = !document.body.classList.contains('dark');
+    document.body.classList.toggle('dark');
+    localStorage.setItem('theme', dark ? 'dark' : 'light');
+    // re-render charts to adapt tick colors
+    renderAll();
+  };
+}
+function initTabs(){
+  document.querySelectorAll('.tab-btn').forEach(b=>{
+    b.onclick = () => {
+      document.querySelectorAll('.tab-btn').forEach(x=>x.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active');
+      el(b.dataset.tab).classList.add('active');
+      // lazy redraw avoids canvas sizing bugs
+      setTimeout(()=>renderAll(),100);
+    };
+  });
+}
+
+/* ===== Executive Summary ===== */
+function renderSummary(){
+  const total = ALL.length;
+  const avg = avgOf(ALL.map(r=>pct(r['% Score'])));
+  const pipe = ALL.reduce((s,r)=> s + num(r['Amount Value']), 0);
+  el('k_total').textContent = total;
+  el('k_avg').textContent = isFinite(avg)? avg.toFixed(1)+'%' : '—';
+  el('k_pipe').textContent = INR(pipe);
+
+  const win = ALL.filter(r=>String(r['Deal Status']||'').toLowerCase().includes('win')).length;
+  const lost = ALL.filter(r=>String(r['Deal Status']||'').toLowerCase().includes('lost')).length;
+  const open = ALL.filter(r=>{
+    const s = String(r['Deal Status']||'').toLowerCase();
+    return s && !s.includes('win') && !s.includes('lost');
+  }).length;
+  el('k_deals').textContent = `${win}/${lost}/${open}`;
+
+  // Funnel
+  const stages = {Pending:0, Live:0, Conflict:0};
+  ALL.forEach(r=>{const s = String(r['Deal Status']||''); if (stages[s]!=null) stages[s]++});
+  const colors = {Pending:'bg-yellow-500', Live:'bg-green-500', Conflict:'bg-red-500'};
+  el('funnel').innerHTML = Object.entries(stages)
+    .map(([k,v])=>`<div class="text-center p-4 rounded-lg flex-1 ${colors[k]} text-white shadow-md">
+        <div class="text-2xl font-bold">${v}</div><div class="text-sm font-semibold">${k}</div></div>`)
+    .join('<div class="text-2xl font-bold text-[var(--text-3)]">→</div>');
+
+  // Meetings by type
+  const sales = ALL.filter(r=>/sales/i.test(r['Meeting Type']||'')).length;
+  const service = ALL.filter(r=>/service/i.test(r['Meeting Type']||'')).length;
+  draw('chartType', 'doughnut', {
+    labels:['Sales','Service'],
+    datasets:[{data:[sales,service]}]
+  }, {cutout:'65%'});
+}
+
+/* ===== Team & Product ===== */
+function renderTeam(){
+  // Team table
+  const teams = uniq(ALL,'Team');
+  const rows = teams.map(t=>{
+    const R = ALL.filter(r=>r['Team']===t);
+    const avg = avgOf(R.map(x=>pct(x['% Score'])));
+    const pipe = R.reduce((s,r)=> s + num(r['Amount Value']), 0);
+    return {team:t, meetings:R.length, avg:isFinite(avg)?avg:0, pipe};
+  }).sort((a,b)=>b.pipe-a.pipe);
+  el('teamBody').innerHTML = rows.map(r=>`
+    <tr class="border-b border-[var(--inp-brd)]">
+      <td class="p-2 font-semibold">${r.team}</td>
+      <td class="p-2">${r.avg.toFixed(1)}%</td>
+      <td class="p-2">${r.meetings}</td>
+      <td class="p-2">${INR(r.pipe)}</td>
+    </tr>`).join('');
+
+  // Product performance (uses "Product Pitch" column if present)
+  const prodKey = 'Product Pitch';
+  const prods = uniq(ALL, prodKey);
+  const dataAvg = prods.map(p=>{
+    const R = ALL.filter(r=>r[prodKey]===p);
+    return avgOf(R.map(x=>pct(x['% Score'])));
+  });
+  const dataVal = prods.map(p=>{
+    const R = ALL.filter(r=>r[prodKey]===p);
+    return R.reduce((s,r)=>s+num(r['Amount Value']),0);
+  });
+  draw('chartProduct','bar',{
+    labels: prods,
+    datasets: [
+      {label:'Avg. % Score', data: dataAvg, yAxisID:'y'},
+      {label:'Total Value (₹)', data: dataVal, yAxisID:'y1'}
+    ]
+  }, {
+    scales: {
+      y: {title:{display:true,text:'% Score'}, suggestedMax:100},
+      y1: {type:'linear', position:'right', grid:{drawOnChartArea:false}, title:{display:true,text:'Value'}}
+    }
+  });
+
+  // Visit type effectiveness
+  const visits = uniq(ALL, 'Visit Type');
+  const visitAvg = visits.map(v=>{
+    const R = ALL.filter(r=>r['Visit Type']===v);
+    return avgOf(R.map(x=>pct(x['% Score'])));
+  });
+  draw('chartVisit','bar',{labels:visits, datasets:[{label:'Avg. % Score', data:visitAvg}]});
+}
+
+/* ===== Deal Analysis ===== */
+function renderDeal(){
+  const pts = ALL.filter(r=>num(r['Amount Value'])>0).map(r=>({
+    x: pct(r['% Score']), y: num(r['Amount Value'])
+  })).filter(p=>isFinite(p.x)&&isFinite(p.y));
+  draw('chartScatter','scatter',{datasets:[{label:'Deal',data:pts}]},{
+    scales:{ x:{title:{display:true,text:'% Score'}, suggestedMin:0, suggestedMax:100},
+             y:{title:{display:true,text:'Deal Value (INR)'}}}
+  });
+}
+
+/* ===== Individual Deep Dive ===== */
+function initIndividualFilters(){
+  const owners = uniq(ALL,'Owner (Who handled the meeting)');
+  el('selOwner').innerHTML = owners.map(o=>`<option>${o}</option>`).join('');
+  const societies = uniq(ALL,'Society Name');
+  el('riskSociety').innerHTML = `<option value="">All Societies</option>` + societies.map(s=>`<option>${s}</option>`).join('');
+  el('riskOwner').innerHTML = `<option value="">All Owners</option>` + owners.map(o=>`<option>${o}</option>`).join('');
+
+  // Risk tool meeting picker for email
+  const opts = ALL.slice(0,500).sort(by('Date')).map((m,i)=>
+    `<option value="${i}">${(m['Date']||'')} - ${(m['Society Name']||'')} (${m['Owner (Who handled the meeting)']||''})</option>`);
+  el('selMeeting').innerHTML = opts.join('');
+
+  // listeners
+  ['selOwner','start','end','selStatus'].forEach(id => el(id).addEventListener('change', renderIndividual));
+  ['riskOwner','riskSociety'].forEach(id => el(id).addEventListener('change', renderRisk));
+  el('btnExcel').onclick = downloadExcel;
+}
+function renderIndividual(){
+  const owner = el('selOwner').value;
+  const a = el('start').value;
+  const b = el('end').value;
+  const st = el('selStatus').value;
+
+  let rows = ALL.filter(r => (r['Owner (Who handled the meeting)']||'')===owner);
+  if (a) rows = rows.filter(r=> (r['Date']||'') >= a);
+  if (b) rows = rows.filter(r=> (r['Date']||'') <= b);
+  if (st) rows = rows.filter(r=> (r['Deal Status']||'') === st);
+
+  const kpis = [
+    {label:'Meetings', val: rows.length},
+    {label:'Avg % Score', val: isFinite(avgOf(rows.map(x=>pct(x['% Score'])))) ? avgOf(rows.map(x=>pct(x['% Score']))).toFixed(1)+'%' : '—'},
+    {label:'Pipeline', val: INR(rows.reduce((s,r)=>s+num(r['Amount Value']),0))}
+  ];
+  el('indivKpis').innerHTML = kpis.map(k=>`<div class="card p-5 text-center"><div class="text-sm text-[var(--text-3)]">${k.label}</div><div class="text-3xl font-bold text-sky-400 mt-1">${k.val}</div></div>`).join('');
+
+  const best = rows.reduce((best,r)=>{
+    const s = pct(r['% Score']); return (isFinite(s) && (!best || s>best._s)) ? Object.assign({_s:s}, r) : best;
+  }, null);
+  el('bestBox').innerHTML = best ? `
+    <div class="kv">
+      <div class="text-[var(--text-3)]">Society</div><div>${best['Society Name']||''}</div>
+      <div class="text-[var(--text-3)]">Date</div><div>${best['Date']||''}</div>
+      <div class="text-[var(--text-3)]">% Score</div><div>${pct(best['% Score']).toFixed(1)}%</div>
+      <div class="text-[var(--text-3)]">Deal Status</div><div>${best['Deal Status']||''}</div>
+    </div>` : '<div class="text-sm">No meetings in range.</div>';
+
+  const uniqList = (key) => Array.from(new Set(rows.map(r=>String(r[key]||'').trim()).filter(Boolean)));
+  el('listImprove').innerHTML  = li(uniqList('Improvement Areas'));
+  el('listPositive').innerHTML = li(uniqList('Positive Factors'));
+  el('listMissed').innerHTML   = li(uniqList('Missed Opportunities'));
+
+  // Simple “action items” from “Action items” column if present
+  const acts = rows.map(r=>r['Action items']).filter(Boolean);
+  el('actionsBox').innerHTML = acts.length ? acts.map(x=>`<div class="p-2 bg-black/10 rounded mb-1">${x}</div>`).join('') : '<div class="text-sm">None noted.</div>';
+}
+function li(arr){ return (arr.length?arr:['None']).map(x=>`<li>${x}</li>`).join(''); }
+
+/* ===== Risk ===== */
+function renderRisk(){
+  const owner = el('riskOwner').value;
+  const society = el('riskSociety').value;
+  let rows = ALL.filter(r=> String(r['Risks / Unresolved Issues']||'').trim());
+  if (owner) rows = rows.filter(r=> (r['Owner (Who handled the meeting)']||'')===owner);
+  if (society) rows = rows.filter(r=> (r['Society Name']||'')===society);
+  el('riskBody').innerHTML = rows.map(r=>`
+    <tr class="border-b border-[var(--inp-brd)]">
+      <td class="p-2">${r['Date']||''}</td>
+      <td class="p-2">${r['Owner (Who handled the meeting)']||''}</td>
+      <td class="p-2">${r['Society Name']||''}</td>
+      <td class="p-2">${r['Risks / Unresolved Issues']||''}</td>
+    </tr>`).join('');
+}
+
+/* ===== Charts helper ===== */
+function draw(id, type, data, extraOpts={}){
+  const ctx = el(id).getContext('2d');
+  if (charts[id]) charts[id].destroy();
+  const isDark = document.body.classList.contains('dark');
+  const opts = {
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color: isDark ? '#cbd5e1' : '#334155' } } },
+    scales:{
+      x:{ ticks:{ color:isDark ? '#94a3b8' : '#64748b' }, grid:{ color:getGrid() } },
+      y:{ ticks:{ color:isDark ? '#94a3b8' : '#64748b' }, grid:{ color:getGrid() } }
+    },
+    ...extraOpts
+  };
+  charts[id] = new Chart(ctx, {type, data, options: opts});
+}
+function getGrid(){ return document.body.classList.contains('dark') ? 'rgba(71,85,105,.5)' : 'rgba(0,0,0,.1)'; }
+function avgOf(arr){
+  const xs = arr.filter(x=>isFinite(x)); return xs.length ? xs.reduce((a,b)=>a+b,0)/xs.length : NaN;
+}
+
+/* ===== Excel Download ===== */
+function downloadExcel(){
+  const owner = el('selOwner').value;
+  const a = el('start').value;
+  const b = el('end').value;
+  let rows = ALL.filter(r => (r['Owner (Who handled the meeting)']||'')===owner);
+  if (a) rows = rows.filter(r=> (r['Date']||'') >= a);
+  if (b) rows = rows.filter(r=> (r['Date']||'') <= b);
+
+  const wb = XLSX.utils.book_new();
+  const ws1 = XLSX.utils.json_to_sheet(rows);
+  XLSX.utils.book_append_sheet(wb, ws1, "Weekly Report");
+
+  const trend = rows.map(r=>({Date:r['Date'],Society:r['Society Name'],PitchScore:r['Product Pitch Score']}));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(trend), "Skill Trends");
+
+  XLSX.writeFile(wb, `Meeting_Analysis_${owner||'All'}.xlsx`);
+}
+
+/* ===== Modal (click row via scatter point later if needed) ===== */
+el('mClose').onclick = () => el('modal').classList.remove('show');
+function showMeetingModal(meeting){
+  el('mTitle').textContent = `${meeting['Date']||''} - ${meeting['Society Name']||''}`;
+  el('mBody').innerHTML = `
+    <div class="text-[var(--text-3)]">Owner</div><div>${meeting['Owner (Who handled the meeting)']||''}</div>
+    <div class="text-[var(--text-3)]">POC</div><div>${meeting['POC Name']||''}</div>
+    <div class="text-[var(--text-3)]">Deal Status</div><div>${meeting['Deal Status']||''}</div>
+    <div class="text-[var(--text-3)]">% Score</div><div>${pct(meeting['% Score']).toFixed(1)}%</div>
+    <div class="text-[var(--text-3)]">Amount</div><div>${INR(num(meeting['Amount Value']))}</div>
+    <div class="text-[var(--text-3)]">Risks</div><div>${meeting['Risks / Unresolved Issues']||'—'}</div>`;
+  el('modal').classList.add('show');
+}
+
+/* ===== Optional AI (proxy) ===== */
+function aiEnabled(){ return !!window.GEMINI_PROXY_URL; }
+function initAI(){
+  const file = el('fileTxt');
+  const btnA = el('btnAnalyze');
+  const sel = el('selMeeting');
+  const btnE = el('btnEmail');
+
+  file.addEventListener('change', () => btnA.disabled = !(file.files && file.files[0] && aiEnabled()));
+  btnA.onclick = async () => {
+    if (!aiEnabled()) { el('outAnalyze').textContent = 'AI disabled (no proxy).'; return; }
+    const f = file.files[0]; if (!f) return;
+    show('loadAnalyze', true); el('outAnalyze').textContent = '';
+    const text = await f.text();
+    const system = "You are a sales meeting analyst. Return strict JSON with keys: POC Name, Society Name, Deal Status, Risks / Unresolved Issues, Improvements Needed, Suggestions & Missed Topics, Opening Pitch Score, Product Pitch Score, Cross-Sell / Opportunity Handling, Closing Effectiveness, Negotiation Strength, Overall Sentiment.";
+    const user = "Analyze this transcript:\n" + text.slice(0, 50000);
+    const res = await fetch(window.GEMINI_PROXY_URL, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system,user})});
+    const j = await res.json().catch(()=>({text:'(no result)'}));
+    show('loadAnalyze', false);
+    try{
+      const clean = String(j.text||'').replace(/```json|```/g,'').trim();
+      const obj = JSON.parse(clean);
+      el('outAnalyze').innerHTML = gridKV(obj);
+    }catch(e){
+      el('outAnalyze').textContent = j.text || 'Could not parse AI response.';
+    }
+  };
+
+  btnE.onclick = async () => {
+    if (!aiEnabled()) { el('outEmail').textContent = 'AI disabled (no proxy).'; return; }
+    const idx = parseInt(sel.value, 10) || 0;
+    const meeting = ALL[idx] || ALL[0];
+    show('loadEmail', true); el('outEmail').textContent = '';
+    const system = "You are a helpful sales assistant. Draft a concise follow-up email to the client with key points and next steps.";
+    const user = "Meeting data:\n" + JSON.stringify(meeting);
+    const res = await fetch(window.GEMINI_PROXY_URL, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system,user})});
+    const j = await res.json().catch(()=>({text:'(no result)'}));
+    show('loadEmail', false);
+    el('outEmail').innerHTML = (j.text||'').replace(/\n/g,'<br>');
+  };
+}
+function gridKV(obj){
+  return '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">' +
+    Object.entries(obj).map(([k,v])=>`<div class="p-3 rounded border"><div class="text-xs text-[var(--text-3)] font-semibold uppercase">${k}</div><div>${v}</div></div>`).join('') +
+  '</div>';
+}
+
+/* ===== Boot ===== */
+(async function(){
+  initTheme();
+  initTabs();
+  await loadData();
+
+  renderSummary();
+  renderTeam();
+  renderDeal();
+  initIndividualFilters();
+  renderIndividual();
+  renderRisk();
+  initAI();
+  // small meeting modal from scatter click (optional)
+  if (charts.chartScatter) {
+    charts.chartScatter.options.onClick = (evt, els) => {
+      if (els.length){
+        const pt = els[0].index;
+        const target = ALL.filter(r=>num(r['Amount Value'])>0).filter(r=>isFinite(pct(r['% Score'])))[pt];
+        if (target) showMeetingModal(target);
+      }
+    };
+  }
+})();
 </script>
 </body>
 </html>
