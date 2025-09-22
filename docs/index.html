@@ -265,21 +265,40 @@
   /* =======================
        Config (AI proxy)
      =======================
-
-     If you want client-side AI buttons, deploy a tiny HTTPS endpoint that forwards requests to Gemini
-     and set this to your proxy URL (it should read {system, user} and return {text}).
+     To enable AI buttons, set a proxy URL that accepts {system,user} and returns {text}.
      Example: window.GEMINI_PROXY_URL = "https://your-cloud-function.example/run";
   */
   window.GEMINI_PROXY_URL = ""; // keep blank to disable AI buttons on public pages
 
   /* ===== Utilities ===== */
   const INR = n => '₹ ' + Math.round(n).toLocaleString('en-IN');
-  const num = v => { if (v == null) return 0; const m = String(v).replace(/₹/g,'').match(/-?\\d[\\d,]*\\.?\\d*/); return m ? parseFloat(m[0].replace(/,/g,'')) : 0; };
+  const num = v => { if (v == null) return 0; const m = String(v).replace(/₹/g,'').match(/-?\d[\d,]*\.?\d*/); return m ? parseFloat(m[0].replace(/,/g,'')) : 0; };
   const pct = v => { if (v == null || v === '') return NaN; const s = String(v).trim(); let x = NaN; if (s.endsWith('%')) x = parseFloat(s.replace('%','')); else x = parseFloat(s); return isFinite(x) ? x : NaN; };
   const by = k => (a,b)=> String(a[k]||'').localeCompare(String(b[k]||''));
   const uniq = (rows,key) => Array.from(new Set(rows.map(r => (r[key]||'').trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
   const el = id => document.getElementById(id);
   const show = (id, on=true) => el(id).classList[on?'remove':'add']('hidden');
+
+  /* ===== Robust amount resolver ===== */
+  const AMT_KEYS = [
+    'Amount Value','Amount','Deal Amount','Deal Value',
+    'Amount (INR)','Amount INR','Amount (₹)','Value (₹)','Pipeline Value','Quoted Amount'
+  ];
+  function amt(r){
+    for (const k of AMT_KEYS){
+      if (k in r && r[k] != null && String(r[k]).trim() !== ''){
+        const n = num(r[k]);
+        if (isFinite(n) && n > 0) return n;
+      }
+    }
+    for (const [k,v] of Object.entries(r||{})){
+      if (/\b(amount|value|deal|pipeline)\b/i.test(k)){
+        const n = num(v);
+        if (isFinite(n) && n > 0) return n;
+      }
+    }
+    return 0;
+  }
 
   /* ===== State ===== */
   let ALL = [];
@@ -289,8 +308,7 @@
   async function loadData(){
     const res = await fetch('dashboard_data.json', {cache:'no-store'});
     ALL = await res.json();
-    // expose for chatbot reuse
-    window.__DASH_ROWS = ALL;
+    window.__DASH_ROWS = ALL; // expose for chatbot reuse
     el('updated').textContent = 'Updated ' + new Date().toLocaleString();
   }
 
@@ -321,7 +339,7 @@
   function renderSummary(){
     const total = ALL.length;
     const avg = avgOf(ALL.map(r=>pct(r['% Score'])));
-    const pipe = ALL.reduce((s,r)=> s + num(r['Amount Value']), 0);
+    const pipe = ALL.reduce((s,r)=> s + amt(r), 0);
     el('k_total').textContent = total;
     el('k_avg').textContent = isFinite(avg)? avg.toFixed(1)+'%' : '—';
     el('k_pipe').textContent = INR(pipe);
@@ -354,12 +372,11 @@
 
   /* ===== Team & Product ===== */
   function renderTeam(){
-    // Team table
     const teams = uniq(ALL,'Team');
     const rows = teams.map(t=>{
       const R = ALL.filter(r=>r['Team']===t);
       const avg = avgOf(R.map(x=>pct(x['% Score'])));
-      const pipe = R.reduce((s,r)=> s + num(r['Amount Value']), 0);
+      const pipe = R.reduce((s,r)=> s + amt(r), 0);
       return {team:t, meetings:R.length, avg:isFinite(avg)?avg:0, pipe};
     }).sort((a,b)=>b.pipe-a.pipe);
     el('teamBody').innerHTML = rows.map(r=>`
@@ -379,7 +396,7 @@
     });
     const dataVal = prods.map(p=>{
       const R = ALL.filter(r=>r[prodKey]===p);
-      return R.reduce((s,r)=>s+num(r['Amount Value']),0);
+      return R.reduce((s,r)=>s+amt(r),0);
     });
     draw('chartProduct','bar',{
       labels: prods,
@@ -405,8 +422,8 @@
 
   /* ===== Deal Analysis ===== */
   function renderDeal(){
-    const pts = ALL.filter(r=>num(r['Amount Value'])>0).map(r=>({
-      x: pct(r['% Score']), y: num(r['Amount Value'])
+    const pts = ALL.filter(r=>amt(r)>0).map(r=>({
+      x: pct(r['% Score']), y: amt(r)
     })).filter(p=>isFinite(p.x)&&isFinite(p.y));
     draw('chartScatter','scatter',{datasets:[{label:'Deal',data:pts}]},{
       scales:{ x:{title:{display:true,text:'% Score'}, suggestedMin:0, suggestedMax:100},
@@ -427,7 +444,6 @@
       `<option value="${i}">${(m['Date']||'')} - ${(m['Society Name']||'')} (${m['Owner (Who handled the meeting)']||''})</option>`);
     el('selMeeting').innerHTML = opts.join('');
 
-    // listeners
     ['selOwner','start','end','selStatus'].forEach(id => el(id).addEventListener('change', renderIndividual));
     ['riskOwner','riskSociety'].forEach(id => el(id).addEventListener('change', renderRisk));
     el('btnExcel').onclick = downloadExcel;
@@ -446,7 +462,7 @@
     const kpis = [
       {label:'Meetings', val: rows.length},
       {label:'Avg % Score', val: isFinite(avgOf(rows.map(x=>pct(x['% Score'])))) ? avgOf(rows.map(x=>pct(x['% Score']))).toFixed(1)+'%' : '—'},
-      {label:'Pipeline', val: INR(rows.reduce((s,r)=>s+num(r['Amount Value']),0))}
+      {label:'Pipeline', val: INR(rows.reduce((s,r)=>s+amt(r),0))}
     ];
     el('indivKpis').innerHTML = kpis.map(k=>`<div class="card p-5 text-center"><div class="text-sm text-[var(--text-3)]">${k.label}</div><div class="text-3xl font-bold text-sky-400 mt-1">${k.val}</div></div>`).join('');
 
@@ -519,7 +535,7 @@
     const ws1 = XLSX.utils.json_to_sheet(rows);
     XLSX.utils.book_append_sheet(wb, ws1, "Weekly Report");
 
-    const trend = rows.map(r=>({Date:r['Date'],Society:r['Society Name'],PitchScore:r['Product Pitch Score']}));
+    const trend = rows.map(r=>({Date:r['Date'],Society:r['Society Name'],PitchScore:r['Product Pitch Score'],Amount:amt(r)}));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(trend), "Skill Trends");
 
     XLSX.writeFile(wb, `Meeting_Analysis_${owner||'All'}.xlsx`);
@@ -534,7 +550,7 @@
       <div class="text-[var(--text-3)]">POC</div><div>${meeting['POC Name']||''}</div>
       <div class="text-[var(--text-3)]">Deal Status</div><div>${meeting['Deal Status']||''}</div>
       <div class="text-[var(--text-3)]">% Score</div><div>${isFinite(pct(meeting['% Score'])) ? pct(meeting['% Score']).toFixed(1)+'%' : ''}</div>
-      <div class="text-[var(--text-3)]">Amount</div><div>${INR(num(meeting['Amount Value']))}</div>
+      <div class="text-[var(--text-3)]">Amount</div><div>${INR(amt(meeting))}</div>
       <div class="text-[var(--text-3)]">Risks</div><div>${meeting['Risks / Unresolved Issues']||'—'}</div>`;
     el('modal').classList.add('show');
   }
@@ -554,7 +570,7 @@
       show('loadAnalyze', true); el('outAnalyze').textContent = '';
       const text = await f.text();
       const system = "You are a sales meeting analyst. Return strict JSON with keys: POC Name, Society Name, Deal Status, Risks / Unresolved Issues, Improvements Needed, Suggestions & Missed Topics, Opening Pitch Score, Product Pitch Score, Cross-Sell / Opportunity Handling, Closing Effectiveness, Negotiation Strength, Overall Sentiment.";
-      const user = "Analyze this transcript:\\n" + text.slice(0, 50000);
+      const user = "Analyze this transcript:\n" + text.slice(0, 50000);
       const res = await fetch(window.GEMINI_PROXY_URL, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system,user})});
       const j = await res.json().catch(()=>({text:'(no result)'}));
       show('loadAnalyze', false);
@@ -573,11 +589,11 @@
       const meeting = ALL[idx] || ALL[0];
       show('loadEmail', true); el('outEmail').textContent = '';
       const system = "You are a helpful sales assistant. Draft a concise follow-up email to the client with key points and next steps.";
-      const user = "Meeting data:\\n" + JSON.stringify(meeting);
+      const user = "Meeting data:\n" + JSON.stringify(meeting);
       const res = await fetch(window.GEMINI_PROXY_URL, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system,user})});
       const j = await res.json().catch(()=>({text:'(no result)'}));
       show('loadEmail', false);
-      el('outEmail').innerHTML = (j.text||'').replace(/\\n/g,'<br>');
+      el('outEmail').innerHTML = (j.text||'').replace(/\n/g,'<br>');
     };
   }
   function gridKV(obj){
@@ -587,10 +603,7 @@
   }
 
   /* ===== Chatbot (InsightBot) ===== */
-  // ==== CONFIG: set this to your Cloud Run URL ====
-  const CHAT_API = 'https://YOUR-CLOUD-RUN-URL/chat';
-
-  // load dashboard data (reuse if already fetched)
+  const CHAT_API = 'https://YOUR-CLOUD-RUN-URL/chat'; // <- set your endpoint
   let __DASH_ROWS = window.__DASH_ROWS || null;
   async function ensureRows(){
     if (__DASH_ROWS) return __DASH_ROWS;
@@ -600,7 +613,7 @@
     return __DASH_ROWS;
   }
   function buildContext(rows, q, limit=30){
-    const terms = q.toLowerCase().split(/\\s+/).filter(Boolean);
+    const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
     const scored = rows.map(r=>{
       const hay = (Object.values(r).join(' ')||'').toLowerCase();
       let score = 0; for (const t of terms){ if (hay.includes(t)) score++; }
@@ -619,7 +632,7 @@
       `Features=${r['Feature Checklist Coverage']||''}`,
       `Next=${r['Next Step Clarity and Commitment']||''}`
     ].join(' | '));
-    return lines.join('\\n');
+    return lines.join('\n');
   }
   const chatToggle = document.getElementById('chatToggle');
   const chatPanel  = document.getElementById('chatPanel');
@@ -640,7 +653,7 @@
     row.className = 'chat-row';
     const b = document.createElement('div');
     b.className = (who==='user') ? 'chat-user' : 'chat-bot';
-    b.innerHTML = (text||'').replace(/\\n/g,'<br>');
+    b.innerHTML = (text||'').replace(/\n/g,'<br>');
     row.appendChild(b);
     chatBody.appendChild(row);
     chatBody.scrollTop = chatBody.scrollHeight;
@@ -670,7 +683,7 @@
       }
       const data = await res.json();
       const lastBot = chatBody.querySelector('.chat-row:last-child .chat-bot');
-      if (lastBot) lastBot.innerHTML = (data.answer||'No answer').replace(/\\n/g,'<br>');
+      if (lastBot) lastBot.innerHTML = (data.answer||'No answer').replace(/\n/g,'<br>');
       else appendBubble(data.answer||'No answer');
     }catch(e){
       const lastBot = chatBody.querySelector('.chat-row:last-child .chat-bot');
@@ -699,12 +712,12 @@
     renderIndividual();
     initAI();
 
-    // click on scatter point -> modal
+    // scatter click → modal
     if (charts.chartScatter) {
       charts.chartScatter.options.onClick = (evt, els) => {
         if (els.length){
           const pt = els[0].index;
-          const target = ALL.filter(r=>num(r['Amount Value'])>0).filter(r=>isFinite(pct(r['% Score'])))[pt];
+          const target = ALL.filter(r=>amt(r)>0).filter(r=>isFinite(pct(r['% Score'])))[pt];
           if (target) showMeetingModal(target);
         }
       };
