@@ -71,7 +71,7 @@ manager_map:
   Waseema: { Manager: "Rahul Chugh", Team: "CT", Email: "waseema.firdous@nobroker.in" }
   Ashish: { Manager: "Rahul Chugh", Team: "CT", Email: "ashish.haldar@nobroker.in" }
   Nishant: { Manager: "Rahul Chugh", Team: "CT", Email: "nishant.paul@nobroker.in" }
-  Rahul Chugh: {Manager: "Saumya B", Team: "CT" Email: "rahul.chugh@nobroker.in" }
+  Rahul Chugh: {Manager: "Saumya B", Team: "CT", Email: "rahul.chugh@nobroker.in" }
 
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
