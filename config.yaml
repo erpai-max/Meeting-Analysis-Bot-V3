@@ -67,11 +67,18 @@ manager_map:
   Sourav: { Manager: "Dipesh", Team: "Emerging City", Email: "sourav.chhangani@nobroker.in" }
   Saleem: { Manager: "Pratik", Team: "Management", Email: "saleem.hk@nobroker.in" }
   Dipesh: { Manager: "Pratik", Team: "Management", Email: "dipesh.karale@nobroker.in" }
+  Roshini: { Manager: "Rahul Chugh", Team: "CT", Email: "roshani.kumari@nobroker.in" }
+  Waseema: { Manager: "Rahul Chugh", Team: "CT", Email: "waseema.firdous@nobroker.in" }
+  Ashish: { Manager: "Rahul Chugh", Team: "CT", Email: "ashish.haldar@nobroker.in" }
+  Nishant: { Manager: "Rahul Chugh", Team: "CT", Email: "nishant.paul@nobroker.in" }
+  Rahul Chugh: {Manager: "Saumya B", Team: "CT" Email: "rahul.chugh@nobroker.in" }
 
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
   Pratik: "pratik.ray@nobroker.in"
+  Rahul Chugh: "rahul.chugh@nobroker.in"
+  Saumy B: "saumya.biswal@nobroker.in"
 
 # -------------------------
 # Optional feature: weekly digest (not required by the core run)
