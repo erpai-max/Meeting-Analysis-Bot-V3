@@ -77,6 +77,9 @@
       <button class="tab-btn" data-tab="tab-individual">🚀 Individual Deep Dive</button>
       <button class="tab-btn" data-tab="tab-risk">⚠️ Risk & Tools</button>
     </nav>
+    
+    <div id="loading" class="flex justify-center items-center py-16"><div class="loader"></div></div>
+    <div id="content" class="hidden">
 
     <!-- Executive Summary -->
     <section id="tab-summary" class="tab active">
@@ -203,6 +206,7 @@
         </div>
       </div>
     </section>
+    </div>
   </div>
 
   <!-- Meeting modal -->
@@ -234,7 +238,6 @@
   <script>
   /* ===== Config ===== */
   // The CHAT_API endpoint should point to your Flask backend.
-  // If running locally, this relative URL is usually correct.
   const CHAT_API = '/chat';
 
   /* ===== Utilities ===== */
@@ -266,155 +269,31 @@
   /* ===== State ===== */
   let ALL = [];
   let charts = {};
-  // --- CHATBOT UPDATE ---
-  // Generate a unique session ID for this user's visit.
   let chatSessionId = crypto.randomUUID();
 
   /* ===== Load data ===== */
-  async function loadData(){
-    // FIX: The `fetch` call for 'dashboard_data.json' was failing because the file
-    // was not available at that relative path in the execution environment.
-    // To make this a self-contained, runnable example, sample data has been
-    // embedded directly into the script.
-    const sampleData = [
-        {
-            "Date": "2025-09-26",
-            "Owner (Who handled the meeting)": "Rohan Sharma",
-            "Manager": "Priya Singh",
-            "Team": "North India Sales",
-            "Society Name": "DLF Crest",
-            "POC Name": "Mr. Gupta",
-            "Deal Status": "Live",
-            "% Score": "88%",
-            "Amount Value": 1200000,
-            "Risks / Unresolved Issues": "Competitor bid is slightly lower.",
-            "Missed Opportunities": "Forgot to mention the new AI security feature.",
-            "Improvement Areas": "Need to be more aggressive on closing.",
-            "Positive Factors": "Strong relationship with the society chairman.",
-            "Action items": "Schedule a follow-up demo for the committee.",
-            "Meeting Type": "Sales",
-            "Product Pitch": "Enterprise Security Suite",
-            "Visit Type": "On-site"
-        },
-        {
-            "Date": "2025-09-25",
-            "Owner (Who handled the meeting)": "Sneha Reddy",
-            "Manager": "Anil Kumar",
-            "Team": "South India Sales",
-            "Society Name": "Prestige Shantiniketan",
-            "POC Name": "Ms. Iyer",
-            "Deal Status": "Win",
-            "% Score": "95%",
-            "Amount Value": 850000,
-            "Risks / Unresolved Issues": "",
-            "Missed Opportunities": "",
-            "Improvement Areas": "",
-            "Positive Factors": "Offered a limited-time discount which sealed the deal.",
-            "Action items": "Initiate onboarding process.",
-            "Meeting Type": "Sales",
-            "Product Pitch": "Community Management Plus",
-            "Visit Type": "Virtual"
-        },
-        {
-            "Date": "2025-09-24",
-            "Owner (Who handled the meeting)": "Amit Patel",
-            "Manager": "Sunita Desai",
-            "Team": "West India Sales",
-            "Society Name": "Lodha Palava",
-            "POC Name": "Mr. Shah",
-            "Deal Status": "Lost",
-            "% Score": "60%",
-            "Amount Value": 950000,
-            "Risks / Unresolved Issues": "Client was not convinced about the ROI.",
-            "Missed Opportunities": "Failed to adequately address competitor's claims.",
-            "Improvement Areas": "Better objection handling is required.",
-            "Positive Factors": "Initial interest was high.",
-            "Action items": "Mark as lost, schedule a feedback call in 3 months.",
-            "Meeting Type": "Sales",
-            "Product Pitch": "Enterprise Security Suite",
-            "Visit Type": "On-site"
-        },
-        {
-            "Date": "2025-09-23",
-            "Owner (Who handled the meeting)": "Rohan Sharma",
-            "Manager": "Priya Singh",
-            "Team": "North India Sales",
-            "Society Name": "Godrej South Estate",
-            "POC Name": "Mr. Verma",
-            "Deal Status": "Pending",
-            "% Score": "75%",
-            "Amount Value": 1500000,
-            "Risks / Unresolved Issues": "Budget approval is pending from their finance team.",
-            "Missed Opportunities": "",
-            "Improvement Areas": "Follow up more consistently.",
-            "Positive Factors": "Product demo was very well received.",
-            "Action items": "Send a weekly follow-up email.",
-            "Meeting Type": "Sales",
-            "Product Pitch": "Smart Society Automation",
-            "Visit Type": "Virtual"
-        },
-        {
-            "Date": "2025-09-22",
-            "Owner (Who handled the meeting)": "Sneha Reddy",
-            "Manager": "Anil Kumar",
-            "Team": "South India Sales",
-            "Society Name": "Sobha Dream Acres",
-            "POC Name": "Mr. Menon",
-            "Deal Status": "Live",
-            "% Score": "82%",
-            "Amount Value": 780000,
-            "Risks / Unresolved Issues": "",
-            "Missed Opportunities": "",
-            "Improvement Areas": "",
-            "Positive Factors": "Client is very impressed with our support structure.",
-            "Action items": "Send the final contract for review.",
-            "Meeting Type": "Service",
-            "Product Pitch": "Community Management Plus",
-            "Visit Type": "On-site"
-        },
-        {
-            "Date": "2025-09-21",
-            "Owner (Who handled the meeting)": "Vikram Singh",
-            "Manager": "Priya Singh",
-            "Team": "North India Sales",
-            "Society Name": "Tata Primanti",
-            "POC Name": "Mrs. Kaur",
-            "Deal Status": "Conflict",
-            "% Score": "55%",
-            "Amount Value": 1100000,
-            "Risks / Unresolved Issues": "Disagreement within the committee on which vendor to choose.",
-            "Missed Opportunities": "Could not get all decision-makers in one meeting.",
-            "Improvement Areas": "Stakeholder mapping before the main presentation.",
-            "Positive Factors": "Our technical features are superior.",
-            "Action items": "Try to schedule a meeting with the entire committee.",
-            "Meeting Type": "Sales",
-            "Product Pitch": "Smart Society Automation",
-            "Visit Type": "On-site"
-        },
-        {
-            "Date": "2025-09-20",
-            "Owner (Who handled the meeting)": "Amit Patel",
-            "Manager": "Sunita Desai",
-            "Team": "West India Sales",
-            "Society Name": "Hiranandani Gardens",
-            "POC Name": "Mr. Joshi",
-            "Deal Status": "Win",
-            "% Score": "98%",
-            "Amount Value": 2200000,
-            "Risks / Unresolved Issues": "",
-            "Missed Opportunities": "",
-            "Improvement Areas": "",
-            "Positive Factors": "Excellent negotiation and rapport building.",
-            "Action items": "Celebrate with the team and start deployment.",
-            "Meeting Type": "Sales",
-            "Product Pitch": "Smart Society Automation",
-            "Visit Type": "Virtual"
-        }
-    ];
-
-    ALL = sampleData;
-    el('updated').textContent = 'Updated ' + new Date().toLocaleString();
-    return Promise.resolve(); // Maintain async behavior for compatibility.
+  async function loadData() {
+    try {
+      // Fetches data from a local JSON file named dashboard_data.json.
+      // Make sure this file is in the same folder as your index.html.
+      const response = await fetch('dashboard_data.json', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      ALL = await response.json();
+      el('updated').textContent = 'Updated ' + new Date().toLocaleString();
+    } catch (error) {
+      console.error('Error loading dashboard_data.json:', error);
+      // Display a user-friendly error message on the page.
+      el('loading').innerHTML = `
+        <div class="text-center text-red-500">
+          <h2 class="text-xl font-bold mb-2">Failed to load data</h2>
+          <p>Please make sure a valid <code>dashboard_data.json</code> file exists in the same directory as this HTML file.</p>
+        </div>
+      `;
+      // Stop further execution if data fails to load
+      throw new Error("Data load failed, stopping execution.");
+    }
   }
 
   /* ===== Theme & Tabs ===== */
@@ -443,6 +322,7 @@
 
   /* ===== Executive Summary ===== */
   function renderSummary(){
+    if (ALL.length === 0) return;
     const total = ALL.length;
     const avg = avgOf(ALL.map(r=>pct(r['% Score'])));
     const pipe = ALL.reduce((s,r)=> s + amt(r), 0);
@@ -478,6 +358,7 @@
 
   /* ===== Team & Product ===== */
   function renderTeam(){
+    if (ALL.length === 0) return;
     const teams = uniq(ALL,'Team');
     const rows = teams.map(t=>{
       const R = ALL.filter(r=>r['Team']===t);
@@ -523,6 +404,7 @@
 
   /* ===== Deal Analysis ===== */
   function renderDeal(){
+    if (ALL.length === 0) return;
     const pts = ALL.filter(r=>amt(r)>0).map(r=>({
       x: pct(r['% Score']), y: amt(r)
     })).filter(p=>isFinite(p.x)&&isFinite(p.y));
@@ -530,14 +412,10 @@
     draw('chartScatter','scatter',{datasets:[{label:'Deal',data:pts, backgroundColor: '#0ea5e9'}]},{
       scales:{ x:{title:{display:true,text:'% Score'}, suggestedMin:0, suggestedMax:100},
                y:{title:{display:true,text:'Deal Value (INR)'}}},
-      // --- BUG FIX ---
-      // This onClick handler is now part of the drawing options, so it gets
-      // re-attached every time the chart is redrawn (e.g., after a theme change).
       onClick: (evt, els) => {
         if (els.length > 0){
           const ptIndex = els[0].index;
           const clickedPoint = pts[ptIndex];
-          // Find the original data row corresponding to the clicked point
           const targetMeeting = ALL.find(r => pct(r['% Score']) === clickedPoint.x && amt(r) === clickedPoint.y);
           if (targetMeeting) {
             showMeetingModal(targetMeeting);
@@ -549,6 +427,7 @@
 
   /* ===== Individual Deep Dive ===== */
   function initIndividualFilters(){
+    if (ALL.length === 0) return;
     const owners = uniq(ALL,'Owner (Who handled the meeting)');
     el('selOwner').innerHTML = owners.map(o=>`<option>${o}</option>`).join('');
     const societies = uniq(ALL,'Society Name');
@@ -560,6 +439,7 @@
     el('btnExcel').onclick = downloadExcel;
   }
   function renderIndividual(){
+    if (ALL.length === 0) return;
     const owner = el('selOwner').value;
     const a = el('start').value;
     const b = el('end').value;
@@ -600,6 +480,7 @@
 
   /* ===== Risk ===== */
   function renderRisk(){
+    if (ALL.length === 0) return;
     const owner = el('riskOwner').value;
     const society = el('riskSociety').value;
     let rows = ALL.filter(r=> String(r['Risks / Unresolved Issues']||'').trim());
@@ -636,6 +517,7 @@
 
   /* ===== Excel Download ===== */
   function downloadExcel(){
+    if (ALL.length === 0) return;
     const owner = el('selOwner').value;
     const a = el('start').value;
     const b = el('end').value;
@@ -675,18 +557,15 @@
   /* ===== Chatbot (InsightBot) ===== */
   function buildContextForChat(query){
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    // Score rows based on how many query terms they contain
     const scored = ALL.map(r=>{
       const hay = (Object.values(r).join(' ')||'').toLowerCase();
       let score = 0; for (const t of terms){ if (hay.includes(t)) score++; }
       return { r, score };
     })
-    // Filter for rows that have at least one match, sort by score, and take the top 30
     .filter(x=>x.score>0)
     .sort((a,b)=>b.score-a.score)
     .slice(0, 30);
 
-    // Format the top-scoring rows into a concise string for the LLM
     const lines = scored.map(({r}) => [
       `Date=${r['Date']||''}`,
       `Owner=${r['Owner (Who handled the meeting)']||''}`,
@@ -719,12 +598,11 @@
       row.className = 'chat-row';
       const b = document.createElement('div');
       b.className = (who==='user') ? 'chat-user' : 'chat-bot';
-      // Basic sanitization to prevent HTML injection
       b.textContent = text;
       row.appendChild(b);
       chatBody.appendChild(row);
       chatBody.scrollTop = chatBody.scrollHeight;
-      return b; // Return the bubble element
+      return b;
     }
 
     async function sendChat(){
@@ -739,8 +617,6 @@
         const res = await fetch(CHAT_API, {
           method:'POST',
           headers:{'Content-Type':'application/json'},
-          // --- CHATBOT UPDATE ---
-          // Send the question, context, and the unique session ID to the backend.
           body: JSON.stringify({
             question: q,
             context: context,
@@ -774,14 +650,26 @@
   }
 
   (async function(){
-    initTheme();
-    initTabs();
-    await loadData();
+    try {
+        initTheme();
+        initTabs();
+        
+        el('loading').style.display = 'flex';
+        el('content').style.display = 'none';
 
-    renderAll();
-    initIndividualFilters();
-    renderIndividual();
-    initChatbot();
+        await loadData();
+        
+        el('loading').style.display = 'none';
+        el('content').style.display = 'block';
+
+        renderAll();
+        initIndividualFilters();
+        renderIndividual();
+        initChatbot();
+    } catch (e) {
+        console.error("Dashboard initialization failed:", e.message);
+        // The error message is already displayed by loadData, so we just log here.
+    }
   })();
   </script>
 </body>
