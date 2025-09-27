@@ -1,15 +1,29 @@
-# Use an official Python runtime as a parent image
+# Use an official Python runtime as the base image
 FROM python:3.10-slim
 
-# Set the working directory in the container
+# Set environment variables to disable buffering and set a default value for the port
+ENV PYTHONUNBUFFERED 1
+ENV FLASK_APP=app.py
+ENV FLASK_RUN_HOST=0.0.0.0
+ENV FLASK_RUN_PORT=8080
+
+# Create and set the working directory inside the container
 WORKDIR /app
 
-# Copy the requirements file and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy the current directory contents into the container at /app
+COPY . /app/
 
-# Copy the rest of the application code (just app.py in this case)
-COPY app.py .
+# Install necessary system dependencies (like ffmpeg for audio processing)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-# Run the application with Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
+# Install the Python dependencies
+RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
+
+# Expose the Flask port
+EXPOSE 8080
+
+# Command to run the Flask app
+CMD ["flask", "run", "--host=0.0.0.0", "--port=8080"]
