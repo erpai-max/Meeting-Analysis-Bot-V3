@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install the Python dependencies
 RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+RUN pip install -r requirements_app.txt
 
 # Expose the Flask port
 EXPOSE 8080
