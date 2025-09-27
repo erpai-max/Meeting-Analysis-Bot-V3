@@ -1,4 +1,9 @@
 Flask>=3.0.0
 flask-cors>=4.0.0
-google-generativeai>=0.5.4
+google-cloud-dialogflow>=3.0.2
+google-cloud>=3.0.0
+requests>=2.31.0
 gunicorn>=21.2.0
+google-auth>=2.22.0
+google-auth-oauthlib>=1.1.0
+pyyaml>=6.0.1
