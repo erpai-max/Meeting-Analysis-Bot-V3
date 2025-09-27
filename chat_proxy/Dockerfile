@@ -17,7 +17,7 @@ RUN pip install --upgrade pip
 
 # --- FIX ---
 # This is the key change. We are now installing packages from the dedicated
-# requirements file for the web app, which includes gunicorn.
+# requirements file for the web app, which correctly includes gunicorn.
 RUN pip install -r requirements_app.txt
 
 # Expose the port that Render will assign
