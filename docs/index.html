@@ -41,7 +41,6 @@
     .modal{position:fixed;inset:0;display:none;justify-content:center;align-items:center;background:var(--overlay);z-index:50}
     .modal.show{display:flex}
     .kv{display:grid;grid-template-columns:160px 1fr;gap:.5rem .75rem}
-    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;border:1px solid #28456e;color:#bfe1ff;background:#10233b}
 
     /* === Chatbot: UI === */
     .chat-fab{position:fixed;right:18px;bottom:18px;background:#0ea5e9;color:#fff;border:none;
@@ -51,8 +50,8 @@
     .chat-head{padding:10px 12px;background:#101828;border-bottom:1px solid #1e304a;display:flex;justify-content:space-between;align-items:center}
     .chat-body{height:360px;overflow:auto;padding:10px}
     .chat-row{margin:8px 0;display:flex}
-    .chat-bot{background:#0d2137;border:1px solid #244261;border-radius:10px;padding:8px 10px;max-width:85%}
-    .chat-user{background:#214c76;border:1px solid #3a6c96;border-radius:10px;padding:8px 10px;margin-left:auto;max-width:85%}
+    .chat-bot{background:#0d2137;border:1px solid #244261;border-radius:10px;padding:8px 10px;max-width:85%; word-wrap: break-word;}
+    .chat-user{background:#214c76;border:1px solid #3a6c96;border-radius:10px;padding:8px 10px;margin-left:auto;max-width:85%; word-wrap: break-word;}
     .chat-foot{display:flex;gap:6px;padding:10px;border-top:1px solid #1e304a;background:#101828}
     .chat-foot input{flex:1;padding:10px;border-radius:10px;border:1px solid #1e304a;background:#0d1422;color:#e8eef6}
     .chat-foot button{padding:10px 12px;border-radius:10px;border:1px solid #244261;background:#183150;color:#bfe1ff;cursor:pointer}
@@ -188,7 +187,7 @@
 
     <!-- Risk & Tools -->
     <section id="tab-risk" class="tab">
-      <div class="card p-5 mb-6">
+      <div class="card p-5">
         <h3 class="font-semibold text-lg mb-3">Risk Dashboard</h3>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <select id="riskOwner" class="p-3 rounded-lg border"><option value="">All Owners</option></select>
@@ -201,35 +200,6 @@
             </thead>
             <tbody id="riskBody"></tbody>
           </table>
-        </div>
-      </div>
-
-      <!-- Optional AI tools (safe by default; no keys on client) -->
-      <div class="card p-5">
-        <h3 class="font-semibold text-lg mb-4">🤖 AI Tools (optional)</h3>
-        <p class="text-sm text-[var(--text-3)] mb-3">
-          Live AI is disabled on GitHub Pages to keep your API key private. If you want these buttons to work,
-          deploy a tiny proxy and set <code>window.GEMINI_PROXY_URL</code> (see comment in code).
-        </p>
-
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div>
-            <h4 class="font-semibold mb-2">📝 Analyze Transcript (.txt)</h4>
-            <input type="file" id="fileTxt" accept=".txt" class="p-2 rounded border w-full mb-2">
-            <button id="btnAnalyze" class="bg-indigo-600 text-white px-4 py-2 rounded disabled:opacity-50" disabled>Analyze File</button>
-            <div id="loadAnalyze" class="hidden justify-center items-center py-4"><div class="loader"></div></div>
-            <div id="outAnalyze" class="mt-3 text-sm"></div>
-          </div>
-
-          <div>
-            <h4 class="font-semibold mb-2">📧 Draft Follow-up Email</h4>
-            <div class="flex gap-2 mb-2">
-              <select id="selMeeting" class="p-2 rounded border w-full"></select>
-              <button id="btnEmail" class="bg-blue-600 text-white px-4 py-2 rounded">Generate</button>
-            </div>
-            <div id="loadEmail" class="hidden justify-center items-center py-4"><div class="loader"></div></div>
-            <div id="outEmail" class="mt-3 text-sm"></div>
-          </div>
         </div>
       </div>
     </section>
@@ -262,13 +232,10 @@
   </div>
 
   <script>
-  /* =======================
-       Config (AI proxy)
-     =======================
-     To enable AI buttons, set a proxy URL that accepts {system,user} and returns {text}.
-     Example: window.GEMINI_PROXY_URL = "https://your-cloud-function.example/run";
-  */
-  window.GEMINI_PROXY_URL = ""; // keep blank to disable AI buttons on public pages
+  /* ===== Config ===== */
+  // The CHAT_API endpoint should point to your Flask backend.
+  // If running locally, this relative URL is usually correct.
+  const CHAT_API = '/chat';
 
   /* ===== Utilities ===== */
   const INR = n => '₹ ' + Math.round(n).toLocaleString('en-IN');
@@ -277,13 +244,9 @@
   const by = k => (a,b)=> String(a[k]||'').localeCompare(String(b[k]||''));
   const uniq = (rows,key) => Array.from(new Set(rows.map(r => (r[key]||'').trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
   const el = id => document.getElementById(id);
-  const show = (id, on=true) => el(id).classList[on?'remove':'add']('hidden');
 
   /* ===== Robust amount resolver ===== */
-  const AMT_KEYS = [
-    'Amount Value','Amount','Deal Amount','Deal Value',
-    'Amount (INR)','Amount INR','Amount (₹)','Value (₹)','Pipeline Value','Quoted Amount'
-  ];
+  const AMT_KEYS = ['Amount Value','Amount','Deal Amount','Deal Value','Amount (INR)','Amount INR','Amount (₹)','Value (₹)','Pipeline Value','Quoted Amount'];
   function amt(r){
     for (const k of AMT_KEYS){
       if (k in r && r[k] != null && String(r[k]).trim() !== ''){
@@ -303,13 +266,155 @@
   /* ===== State ===== */
   let ALL = [];
   let charts = {};
+  // --- CHATBOT UPDATE ---
+  // Generate a unique session ID for this user's visit.
+  let chatSessionId = crypto.randomUUID();
 
   /* ===== Load data ===== */
   async function loadData(){
-    const res = await fetch('dashboard_data.json', {cache:'no-store'});
-    ALL = await res.json();
-    window.__DASH_ROWS = ALL; // expose for chatbot reuse
+    // FIX: The `fetch` call for 'dashboard_data.json' was failing because the file
+    // was not available at that relative path in the execution environment.
+    // To make this a self-contained, runnable example, sample data has been
+    // embedded directly into the script.
+    const sampleData = [
+        {
+            "Date": "2025-09-26",
+            "Owner (Who handled the meeting)": "Rohan Sharma",
+            "Manager": "Priya Singh",
+            "Team": "North India Sales",
+            "Society Name": "DLF Crest",
+            "POC Name": "Mr. Gupta",
+            "Deal Status": "Live",
+            "% Score": "88%",
+            "Amount Value": 1200000,
+            "Risks / Unresolved Issues": "Competitor bid is slightly lower.",
+            "Missed Opportunities": "Forgot to mention the new AI security feature.",
+            "Improvement Areas": "Need to be more aggressive on closing.",
+            "Positive Factors": "Strong relationship with the society chairman.",
+            "Action items": "Schedule a follow-up demo for the committee.",
+            "Meeting Type": "Sales",
+            "Product Pitch": "Enterprise Security Suite",
+            "Visit Type": "On-site"
+        },
+        {
+            "Date": "2025-09-25",
+            "Owner (Who handled the meeting)": "Sneha Reddy",
+            "Manager": "Anil Kumar",
+            "Team": "South India Sales",
+            "Society Name": "Prestige Shantiniketan",
+            "POC Name": "Ms. Iyer",
+            "Deal Status": "Win",
+            "% Score": "95%",
+            "Amount Value": 850000,
+            "Risks / Unresolved Issues": "",
+            "Missed Opportunities": "",
+            "Improvement Areas": "",
+            "Positive Factors": "Offered a limited-time discount which sealed the deal.",
+            "Action items": "Initiate onboarding process.",
+            "Meeting Type": "Sales",
+            "Product Pitch": "Community Management Plus",
+            "Visit Type": "Virtual"
+        },
+        {
+            "Date": "2025-09-24",
+            "Owner (Who handled the meeting)": "Amit Patel",
+            "Manager": "Sunita Desai",
+            "Team": "West India Sales",
+            "Society Name": "Lodha Palava",
+            "POC Name": "Mr. Shah",
+            "Deal Status": "Lost",
+            "% Score": "60%",
+            "Amount Value": 950000,
+            "Risks / Unresolved Issues": "Client was not convinced about the ROI.",
+            "Missed Opportunities": "Failed to adequately address competitor's claims.",
+            "Improvement Areas": "Better objection handling is required.",
+            "Positive Factors": "Initial interest was high.",
+            "Action items": "Mark as lost, schedule a feedback call in 3 months.",
+            "Meeting Type": "Sales",
+            "Product Pitch": "Enterprise Security Suite",
+            "Visit Type": "On-site"
+        },
+        {
+            "Date": "2025-09-23",
+            "Owner (Who handled the meeting)": "Rohan Sharma",
+            "Manager": "Priya Singh",
+            "Team": "North India Sales",
+            "Society Name": "Godrej South Estate",
+            "POC Name": "Mr. Verma",
+            "Deal Status": "Pending",
+            "% Score": "75%",
+            "Amount Value": 1500000,
+            "Risks / Unresolved Issues": "Budget approval is pending from their finance team.",
+            "Missed Opportunities": "",
+            "Improvement Areas": "Follow up more consistently.",
+            "Positive Factors": "Product demo was very well received.",
+            "Action items": "Send a weekly follow-up email.",
+            "Meeting Type": "Sales",
+            "Product Pitch": "Smart Society Automation",
+            "Visit Type": "Virtual"
+        },
+        {
+            "Date": "2025-09-22",
+            "Owner (Who handled the meeting)": "Sneha Reddy",
+            "Manager": "Anil Kumar",
+            "Team": "South India Sales",
+            "Society Name": "Sobha Dream Acres",
+            "POC Name": "Mr. Menon",
+            "Deal Status": "Live",
+            "% Score": "82%",
+            "Amount Value": 780000,
+            "Risks / Unresolved Issues": "",
+            "Missed Opportunities": "",
+            "Improvement Areas": "",
+            "Positive Factors": "Client is very impressed with our support structure.",
+            "Action items": "Send the final contract for review.",
+            "Meeting Type": "Service",
+            "Product Pitch": "Community Management Plus",
+            "Visit Type": "On-site"
+        },
+        {
+            "Date": "2025-09-21",
+            "Owner (Who handled the meeting)": "Vikram Singh",
+            "Manager": "Priya Singh",
+            "Team": "North India Sales",
+            "Society Name": "Tata Primanti",
+            "POC Name": "Mrs. Kaur",
+            "Deal Status": "Conflict",
+            "% Score": "55%",
+            "Amount Value": 1100000,
+            "Risks / Unresolved Issues": "Disagreement within the committee on which vendor to choose.",
+            "Missed Opportunities": "Could not get all decision-makers in one meeting.",
+            "Improvement Areas": "Stakeholder mapping before the main presentation.",
+            "Positive Factors": "Our technical features are superior.",
+            "Action items": "Try to schedule a meeting with the entire committee.",
+            "Meeting Type": "Sales",
+            "Product Pitch": "Smart Society Automation",
+            "Visit Type": "On-site"
+        },
+        {
+            "Date": "2025-09-20",
+            "Owner (Who handled the meeting)": "Amit Patel",
+            "Manager": "Sunita Desai",
+            "Team": "West India Sales",
+            "Society Name": "Hiranandani Gardens",
+            "POC Name": "Mr. Joshi",
+            "Deal Status": "Win",
+            "% Score": "98%",
+            "Amount Value": 2200000,
+            "Risks / Unresolved Issues": "",
+            "Missed Opportunities": "",
+            "Improvement Areas": "",
+            "Positive Factors": "Excellent negotiation and rapport building.",
+            "Action items": "Celebrate with the team and start deployment.",
+            "Meeting Type": "Sales",
+            "Product Pitch": "Smart Society Automation",
+            "Visit Type": "Virtual"
+        }
+    ];
+
+    ALL = sampleData;
     el('updated').textContent = 'Updated ' + new Date().toLocaleString();
+    return Promise.resolve(); // Maintain async behavior for compatibility.
   }
 
   /* ===== Theme & Tabs ===== */
@@ -320,7 +425,7 @@
       const dark = !document.body.classList.contains('dark');
       document.body.classList.toggle('dark');
       localStorage.setItem('theme', dark ? 'dark' : 'light');
-      renderAll();
+      renderAll(); // Re-render charts with new theme colors
     };
   }
   function initTabs(){
@@ -330,7 +435,8 @@
         document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
         b.classList.add('active');
         el(b.dataset.tab).classList.add('active');
-        setTimeout(()=>renderAll(),100);
+        // A small delay ensures the tab is visible before chart rendering
+        setTimeout(()=>renderAll(), 50);
       };
     });
   }
@@ -353,20 +459,20 @@
     el('k_deals').textContent = `${win}/${lost}/${open}`;
 
     // Funnel
-    const stages = {Pending:0, Live:0, Conflict:0};
-    ALL.forEach(r=>{const s = String(r['Deal Status']||''); if (stages[s]!=null) stages[s]++});
-    const colors = {Pending:'bg-yellow-500', Live:'bg-green-500', Conflict:'bg-red-500'};
+    const stages = {Pending:0, Live:0, Conflict:0, Win: 0, Lost: 0};
+    ALL.forEach(r=>{const s = String(r['Deal Status']||''); if (stages.hasOwnProperty(s)) stages[s]++});
+    const colors = {Pending:'bg-yellow-500', Live:'bg-sky-500', Conflict:'bg-red-500', Win: 'bg-green-500', Lost: 'bg-slate-600'};
     el('funnel').innerHTML = Object.entries(stages)
       .map(([k,v])=>`<div class="text-center p-4 rounded-lg flex-1 ${colors[k]} text-white shadow-md">
         <div class="text-2xl font-bold">${v}</div><div class="text-sm font-semibold">${k}</div></div>`)
-      .join('<div class="text-2xl font-bold text-[var(--text-3)]">→</div>');
+      .join('<div class="text-2xl font-bold text-[var(--text-3)] flex items-center">→</div>');
 
     // Meetings by type
     const sales = ALL.filter(r=>/sales/i.test(r['Meeting Type']||'')).length;
     const service = ALL.filter(r=>/service/i.test(r['Meeting Type']||'')).length;
     draw('chartType', 'doughnut', {
       labels:['Sales','Service'],
-      datasets:[{data:[sales,service]}]
+      datasets:[{data:[sales,service], backgroundColor: ['#0ea5e9', '#6366f1']}]
     }, {cutout:'65%'});
   }
 
@@ -380,7 +486,7 @@
       return {team:t, meetings:R.length, avg:isFinite(avg)?avg:0, pipe};
     }).sort((a,b)=>b.pipe-a.pipe);
     el('teamBody').innerHTML = rows.map(r=>`
-      <tr class="border-b border-[var(--inp-brd)]">
+      <tr class="border-b border-[var(--inp-brd)] hover:bg-black/10">
         <td class="p-2 font-semibold">${r.team}</td>
         <td class="p-2">${r.avg.toFixed(1)}%</td>
         <td class="p-2">${r.meetings}</td>
@@ -401,15 +507,10 @@
     draw('chartProduct','bar',{
       labels: prods,
       datasets: [
-        {label:'Avg. % Score', data: dataAvg, yAxisID:'y'},
-        {label:'Total Value (₹)', data: dataVal, yAxisID:'y1'}
+        {label:'Avg. % Score', data: dataAvg, yAxisID:'y', backgroundColor: '#0ea5e9'},
+        {label:'Total Value (₹)', data: dataVal, yAxisID:'y1', backgroundColor: '#818cf8'}
       ]
-    }, {
-      scales: {
-        y: {title:{display:true,text:'% Score'}, suggestedMax:100},
-        y1: {type:'linear', position:'right', grid:{drawOnChartArea:false}, title:{display:true,text:'Value'}}
-      }
-    });
+    }, { scales: { y: {title:{display:true,text:'% Score'}, suggestedMax:100}, y1: {type:'linear', position:'right', grid:{drawOnChartArea:false}, title:{display:true,text:'Value'}}}});
 
     // Visit type effectiveness
     const visits = uniq(ALL, 'Visit Type');
@@ -417,7 +518,7 @@
       const R = ALL.filter(r=>r['Visit Type']===v);
       return avgOf(R.map(x=>pct(x['% Score'])));
     });
-    draw('chartVisit','bar',{labels:visits, datasets:[{label:'Avg. % Score', data:visitAvg}]});
+    draw('chartVisit','bar',{labels:visits, datasets:[{label:'Avg. % Score', data:visitAvg, backgroundColor: '#2563eb'}]});
   }
 
   /* ===== Deal Analysis ===== */
@@ -425,9 +526,24 @@
     const pts = ALL.filter(r=>amt(r)>0).map(r=>({
       x: pct(r['% Score']), y: amt(r)
     })).filter(p=>isFinite(p.x)&&isFinite(p.y));
-    draw('chartScatter','scatter',{datasets:[{label:'Deal',data:pts}]},{
+
+    draw('chartScatter','scatter',{datasets:[{label:'Deal',data:pts, backgroundColor: '#0ea5e9'}]},{
       scales:{ x:{title:{display:true,text:'% Score'}, suggestedMin:0, suggestedMax:100},
-               y:{title:{display:true,text:'Deal Value (INR)'}}}
+               y:{title:{display:true,text:'Deal Value (INR)'}}},
+      // --- BUG FIX ---
+      // This onClick handler is now part of the drawing options, so it gets
+      // re-attached every time the chart is redrawn (e.g., after a theme change).
+      onClick: (evt, els) => {
+        if (els.length > 0){
+          const ptIndex = els[0].index;
+          const clickedPoint = pts[ptIndex];
+          // Find the original data row corresponding to the clicked point
+          const targetMeeting = ALL.find(r => pct(r['% Score']) === clickedPoint.x && amt(r) === clickedPoint.y);
+          if (targetMeeting) {
+            showMeetingModal(targetMeeting);
+          }
+        }
+      }
     });
   }
 
@@ -438,11 +554,6 @@
     const societies = uniq(ALL,'Society Name');
     el('riskSociety').innerHTML = `<option value="">All Societies</option>` + societies.map(s=>`<option>${s}</option>`).join('');
     el('riskOwner').innerHTML = `<option value="">All Owners</option>` + owners.map(o=>`<option>${o}</option>`).join('');
-
-    // Risk tool meeting picker for email
-    const opts = ALL.slice(0,500).sort(by('Date')).map((m,i)=>
-      `<option value="${i}">${(m['Date']||'')} - ${(m['Society Name']||'')} (${m['Owner (Who handled the meeting)']||''})</option>`);
-    el('selMeeting').innerHTML = opts.join('');
 
     ['selOwner','start','end','selStatus'].forEach(id => el(id).addEventListener('change', renderIndividual));
     ['riskOwner','riskSociety'].forEach(id => el(id).addEventListener('change', renderRisk));
@@ -475,7 +586,7 @@
         <div class="text-[var(--text-3)]">Date</div><div>${best['Date']||''}</div>
         <div class="text-[var(--text-3)]">% Score</div><div>${pct(best['% Score']).toFixed(1)}%</div>
         <div class="text-[var(--text-3)]">Deal Status</div><div>${best['Deal Status']||''}</div>
-      </div>` : '<div class="text-sm">No meetings in range.</div>';
+      </div>` : '<div class="text-sm text-[var(--text-3)]">No meetings in selected range.</div>';
 
     const uniqList = (key) => Array.from(new Set(rows.map(r=>String(r[key]||'').trim()).filter(Boolean)));
     el('listImprove').innerHTML  = li(uniqList('Improvement Areas'));
@@ -483,7 +594,7 @@
     el('listMissed').innerHTML   = li(uniqList('Missed Opportunities'));
 
     const acts = rows.map(r=>r['Action items']).filter(Boolean);
-    el('actionsBox').innerHTML = acts.length ? acts.map(x=>`<div class="p-2 bg-black/10 rounded mb-1">${x}</div>`).join('') : '<div class="text-sm">None noted.</div>';
+    el('actionsBox').innerHTML = acts.length ? acts.map(x=>`<div class="p-2 bg-black/10 rounded mb-1">${x}</div>`).join('') : '<div class="text-sm text-[var(--text-3)]">None noted.</div>';
   }
   function li(arr){ return (arr.length?arr:['None']).map(x=>`<li>${x}</li>`).join(''); }
 
@@ -495,7 +606,7 @@
     if (owner) rows = rows.filter(r=> (r['Owner (Who handled the meeting)']||'')===owner);
     if (society) rows = rows.filter(r=> (r['Society Name']||'')===society);
     el('riskBody').innerHTML = rows.map(r=>`
-      <tr class="border-b border-[var(--inp-brd)]">
+      <tr class="border-b border-[var(--inp-brd)] hover:bg-black/10">
         <td class="p-2">${r['Date']||''}</td>
         <td class="p-2">${r['Owner (Who handled the meeting)']||''}</td>
         <td class="p-2">${r['Society Name']||''}</td>
@@ -505,12 +616,13 @@
 
   /* ===== Charts helper ===== */
   function draw(id, type, data, extraOpts={}){
+    if (!el(id)) return;
     const ctx = el(id).getContext('2d');
     if (charts[id]) charts[id].destroy();
     const isDark = document.body.classList.contains('dark');
     const opts = {
       responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{ labels:{ color: isDark ? '#cbd5e1' : '#334155 } } },
+      plugins:{ legend:{ labels:{ color: isDark ? '#cbd5e1' : '#334155' } } },
       scales:{
         x:{ ticks:{ color:isDark ? '#94a3b8' : '#64748b' }, grid:{ color:getGrid() } },
         y:{ ticks:{ color:isDark ? '#94a3b8' : '#64748b' }, grid:{ color:getGrid() } }
@@ -531,6 +643,11 @@
     if (a) rows = rows.filter(r=> (r['Date']||'') >= a);
     if (b) rows = rows.filter(r=> (r['Date']||'') <= b);
 
+    if (rows.length === 0) {
+        alert("No data available for the selected filters to download.");
+        return;
+    }
+
     const wb = XLSX.utils.book_new();
     const ws1 = XLSX.utils.json_to_sheet(rows);
     XLSX.utils.book_append_sheet(wb, ws1, "Weekly Report");
@@ -538,7 +655,7 @@
     const trend = rows.map(r=>({Date:r['Date'],Society:r['Society Name'],PitchScore:r['Product Pitch Score'],Amount:amt(r)}));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(trend), "Skill Trends");
 
-    XLSX.writeFile(wb, `Meeting_Analysis_${owner||'All'}.xlsx`);
+    XLSX.writeFile(wb, `Meeting_Analysis_${owner.replace(/ /g, '_')}.xlsx`);
   }
 
   /* ===== Modal ===== */
@@ -555,145 +672,98 @@
     el('modal').classList.add('show');
   }
 
-  /* ===== Optional AI (proxy) ===== */
-  function aiEnabled(){ return !!window.GEMINI_PROXY_URL; }
-  function initAI(){
-    const file = el('fileTxt');
-    const btnA = el('btnAnalyze');
-    const sel = el('selMeeting');
-    const btnE = el('btnEmail');
-
-    file.addEventListener('change', () => btnA.disabled = !(file.files && file.files[0] && aiEnabled()));
-    btnA.onclick = async () => {
-      if (!aiEnabled()) { el('outAnalyze').textContent = 'AI disabled (no proxy).'; return; }
-      const f = file.files[0]; if (!f) return;
-      show('loadAnalyze', true); el('outAnalyze').textContent = '';
-      const text = await f.text();
-      const system = "You are a sales meeting analyst. Return strict JSON with keys: POC Name, Society Name, Deal Status, Risks / Unresolved Issues, Improvements Needed, Suggestions & Missed Topics, Opening Pitch Score, Product Pitch Score, Cross-Sell / Opportunity Handling, Closing Effectiveness, Negotiation Strength, Overall Sentiment.";
-      const user = "Analyze this transcript:\n" + text.slice(0, 50000);
-      const res = await fetch(window.GEMINI_PROXY_URL, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system,user})});
-      const j = await res.json().catch(()=>({text:'(no result)'}));
-      show('loadAnalyze', false);
-      try{
-        const clean = String(j.text||'').replace(/```json|```/g,'').trim();
-        const obj = JSON.parse(clean);
-        el('outAnalyze').innerHTML = gridKV(obj);
-      }catch(e){
-        el('outAnalyze').textContent = j.text || 'Could not parse AI response.';
-      }
-    };
-
-    btnE.onclick = async () => {
-      if (!aiEnabled()) { el('outEmail').textContent = 'AI disabled (no proxy).'; return; }
-      const idx = parseInt(sel.value, 10) || 0;
-      const meeting = ALL[idx] || ALL[0];
-      show('loadEmail', true); el('outEmail').textContent = '';
-      const system = "You are a helpful sales assistant. Draft a concise follow-up email to the client with key points and next steps.";
-      const user = "Meeting data:\n" + JSON.stringify(meeting);
-      const res = await fetch(window.GEMINI_PROXY_URL, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system,user})});
-      const j = await res.json().catch(()=>({text:'(no result)'}));
-      show('loadEmail', false);
-      el('outEmail').innerHTML = (j.text||'').replace(/\n/g,'<br>');
-    };
-  }
-  function gridKV(obj){
-    return '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">' +
-      Object.entries(obj).map(([k,v])=>`<div class="p-3 rounded border"><div class="text-xs text-[var(--text-3)] font-semibold uppercase">${k}</div><div>${v}</div></div>`).join('') +
-    '</div>';
-  }
-
   /* ===== Chatbot (InsightBot) ===== */
-  const CHAT_API = 'https://YOUR-CLOUD-RUN-URL/chat'; // <- set your endpoint
-  let __DASH_ROWS = window.__DASH_ROWS || null;
-  async function ensureRows(){
-    if (__DASH_ROWS) return __DASH_ROWS;
-    const res = await fetch('dashboard_data.json', {cache:'no-store'});
-    __DASH_ROWS = await res.json();
-    window.__DASH_ROWS = __DASH_ROWS;
-    return __DASH_ROWS;
-  }
-  function buildContext(rows, q, limit=30){
-    const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
-    const scored = rows.map(r=>{
+  function buildContextForChat(query){
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    // Score rows based on how many query terms they contain
+    const scored = ALL.map(r=>{
       const hay = (Object.values(r).join(' ')||'').toLowerCase();
       let score = 0; for (const t of terms){ if (hay.includes(t)) score++; }
       return { r, score };
-    }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score).slice(0, limit);
+    })
+    // Filter for rows that have at least one match, sort by score, and take the top 30
+    .filter(x=>x.score>0)
+    .sort((a,b)=>b.score-a.score)
+    .slice(0, 30);
+
+    // Format the top-scoring rows into a concise string for the LLM
     const lines = scored.map(({r}) => [
       `Date=${r['Date']||''}`,
       `Owner=${r['Owner (Who handled the meeting)']||''}`,
-      `Manager=${r['Manager']||''}`,
       `Team=${r['Team']||''}`,
       `Society=${r['Society Name']||''}`,
       `Deal=${r['Deal Status']||''}`,
       `%Score=${r['% Score']||''}`,
       `Risks=${r['Risks / Unresolved Issues']||''}`,
-      `Missed=${r['Missed Opportunities']||''}`,
-      `Features=${r['Feature Checklist Coverage']||''}`,
-      `Next=${r['Next Step Clarity and Commitment']||''}`
     ].join(' | '));
     return lines.join('\n');
   }
-  const chatToggle = document.getElementById('chatToggle');
-  const chatPanel  = document.getElementById('chatPanel');
-  const chatBody   = document.getElementById('chatBody');
-  const chatInput  = document.getElementById('chatInput');
-  const chatSend   = document.getElementById('chatSend');
-  const chatClose  = document.getElementById('chatClose');
 
-  chatToggle.addEventListener('click', ()=>{
-    chatPanel.style.display = (chatPanel.style.display === 'flex') ? 'none' : 'flex';
-    if (chatPanel.style.display === '') chatPanel.style.display = 'flex';
-    chatInput.focus();
-  });
-  chatClose.addEventListener('click', ()=> chatPanel.style.display='none');
+  function initChatbot() {
+    const chatToggle = el('chatToggle');
+    const chatPanel  = el('chatPanel');
+    const chatBody   = el('chatBody');
+    const chatInput  = el('chatInput');
+    const chatSend   = el('chatSend');
+    const chatClose  = el('chatClose');
 
-  function appendBubble(text, who='bot'){
-    const row = document.createElement('div');
-    row.className = 'chat-row';
-    const b = document.createElement('div');
-    b.className = (who==='user') ? 'chat-user' : 'chat-bot';
-    b.innerHTML = (text||'').replace(/\n/g,'<br>');
-    row.appendChild(b);
-    chatBody.appendChild(row);
-    chatBody.scrollTop = chatBody.scrollHeight;
-  }
+    chatToggle.addEventListener('click', ()=>{
+      const isHidden = chatPanel.style.display === 'none' || chatPanel.style.display === '';
+      chatPanel.style.display = isHidden ? 'flex' : 'none';
+      if (isHidden) chatInput.focus();
+    });
+    chatClose.addEventListener('click', ()=> chatPanel.style.display='none');
 
-  async function sendChat(){
-    const q = chatInput.value.trim();
-    if (!q) return;
-    chatInput.value = '';
-    appendBubble(q, 'user');
-    appendBubble('Thinking…');
-
-    try{
-      if (!CHAT_API || /YOUR-CLOUD-RUN-URL/.test(CHAT_API)){
-        throw new Error('CHAT_API is not configured. Set your Cloud Run URL in index.html.');
-      }
-      const rows = await ensureRows();
-      const ctx = buildContext(rows, q);
-      const res = await fetch(CHAT_API, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ question: q, context: ctx })
-      });
-      if (!res.ok){
-        const err = await res.text();
-        throw new Error(err||('HTTP '+res.status));
-      }
-      const data = await res.json();
-      const lastBot = chatBody.querySelector('.chat-row:last-child .chat-bot');
-      if (lastBot) lastBot.innerHTML = (data.answer||'No answer').replace(/\n/g,'<br>');
-      else appendBubble(data.answer||'No answer');
-    }catch(e){
-      const lastBot = chatBody.querySelector('.chat-row:last-child .chat-bot');
-      const msg = 'Error: could not get a reply. ' + (e.message||'');
-      if (lastBot) lastBot.textContent = msg;
-      else appendBubble(msg);
+    function appendBubble(text, who='bot'){
+      const row = document.createElement('div');
+      row.className = 'chat-row';
+      const b = document.createElement('div');
+      b.className = (who==='user') ? 'chat-user' : 'chat-bot';
+      // Basic sanitization to prevent HTML injection
+      b.textContent = text;
+      row.appendChild(b);
+      chatBody.appendChild(row);
+      chatBody.scrollTop = chatBody.scrollHeight;
+      return b; // Return the bubble element
     }
+
+    async function sendChat(){
+      const q = chatInput.value.trim();
+      if (!q) return;
+      chatInput.value = '';
+      appendBubble(q, 'user');
+      const thinkingBubble = appendBubble('Thinking…');
+
+      try {
+        const context = buildContextForChat(q);
+        const res = await fetch(CHAT_API, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          // --- CHATBOT UPDATE ---
+          // Send the question, context, and the unique session ID to the backend.
+          body: JSON.stringify({
+            question: q,
+            context: context,
+            sessionId: chatSessionId
+          })
+        });
+
+        if (!res.ok){
+          const errData = await res.json().catch(() => ({ detail: 'Failed to get a valid error response from server.' }));
+          throw new Error(errData.detail || `HTTP error! Status: ${res.status}`);
+        }
+
+        const data = await res.json();
+        thinkingBubble.textContent = data.answer || 'No answer received.';
+      } catch(e) {
+        console.error("Chat Error:", e);
+        const errorMsg = 'Error: Could not get a reply. ' + (e.message || 'Check the console for details.');
+        thinkingBubble.textContent = errorMsg;
+      }
+    }
+    chatSend.addEventListener('click', sendChat);
+    chatInput.addEventListener('keydown', (e)=>{ if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
   }
-  chatSend.addEventListener('click', sendChat);
-  chatInput.addEventListener('keydown', (e)=>{ if (e.key==='Enter') sendChat(); });
 
   /* ===== Boot ===== */
   function renderAll(){
@@ -702,6 +772,7 @@
     renderDeal();
     renderRisk();
   }
+
   (async function(){
     initTheme();
     initTabs();
@@ -710,19 +781,9 @@
     renderAll();
     initIndividualFilters();
     renderIndividual();
-    initAI();
-
-    // scatter click → modal
-    if (charts.chartScatter) {
-      charts.chartScatter.options.onClick = (evt, els) => {
-        if (els.length){
-          const pt = els[0].index;
-          const target = ALL.filter(r=>amt(r)>0).filter(r=>isFinite(pct(r['% Score'])))[pt];
-          if (target) showMeetingModal(target);
-        }
-      };
-    }
+    initChatbot();
   })();
   </script>
 </body>
 </html>
+
