@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-import httpx # A modern HTTP client for making API requests
+import httpx # A modern HTTP client for making API requests to OpenRouter
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import chromadb
@@ -20,14 +20,13 @@ if not OPENROUTER_API_KEY:
 
 # --- CORS Configuration ---
 # This allows your dashboard (running on GitHub Pages) to communicate with this backend.
-# For production, you might want to replace "*" with your specific GitHub Pages URL.
 CORS(app, resources={r"/chat": {"origins": "*"}}) 
 
 # --- AI & Vector DB Setup (The Core of the RAG Model) ---
 
 # 1. The Embedding Function (Free & Local)
 # This uses a powerful, free open-source model to understand the meaning of your text.
-# It will be downloaded automatically the first time the server runs.
+# The first time the server runs on Render, it will download this model into the container.
 sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
 
 # 2. The Vector Database (Free & In-Memory)
@@ -53,11 +52,14 @@ Your primary goal is to answer the user's question with a high degree of accurac
 def load_and_index_data():
     """
     This function runs once when the server starts.
-    It loads the dashboard data and indexes it in the vector database.
+    It loads the dashboard data from the JSON file and indexes it in the vector database.
     """
     try:
-        # The Dockerfile copies all project files, so this path is correct inside the container.
-        with open("dashboard_data.json", "r", encoding="utf-8") as f:
+        # This path is now correct because the updated GitHub Action copies
+        # the data file directly into the 'chat_proxy' folder.
+        data_path = "dashboard_data.json"
+        
+        with open(data_path, "r", encoding="utf-8") as f:
             all_meetings = json.load(f)
 
         documents, metadatas, ids = [], [], []
@@ -83,7 +85,7 @@ def load_and_index_data():
             collection.add(documents=documents, metadatas=metadatas, ids=ids)
             logging.info(f"Successfully indexed {len(documents)} meeting records into the vector database.")
     except FileNotFoundError:
-        logging.error("CRITICAL: dashboard_data.json not found. The chatbot will not have context.")
+        logging.error(f"CRITICAL: '{data_path}' not found. The chatbot will not have context. Ensure the GitHub Action is copying the file correctly.")
     except Exception as e:
         logging.error(f"An error occurred during data loading/indexing: {e}")
 
@@ -113,7 +115,7 @@ def chat():
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             },
             json={
-                "model": "nousresearch/nous-hermes-2-mixtral-8x7b-dpo", # A top-tier free model
+                "model": "nousresearch/nous-hermes-2-mixtral-8x7b-dpo", # A top-tier free model on OpenRouter
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": f"CONTEXT:\n{context_str}\n\nQUESTION:\n{question}"}
@@ -135,7 +137,7 @@ def chat():
         return jsonify({"error": "Failed to process chat request.", "detail": str(e)}), 500
 
 if __name__ == "__main__":
-    # This runs when the server starts.
+    # This runs once when the server starts.
     load_and_index_data()
     
     port = int(os.environ.get("PORT", 8080))
