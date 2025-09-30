@@ -22,8 +22,8 @@ jobs:
           cache: "pip" # Caches dependencies for faster runs
 
       # This step correctly installs the dependencies needed by export_dashboard.py
-      - name: Install dependencies from root requirements.txt
-        run: pip install -r requirements.txt
+      - name: Install dependencies from root requirements_app.txt
+        run: pip install -r requirements_app.txt
 
       - name: Export dashboard data from Google Sheets
         env:
