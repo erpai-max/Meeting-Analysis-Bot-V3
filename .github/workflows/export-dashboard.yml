@@ -1,43 +1,46 @@
-name: Export Dashboard
+name: Export and Distribute Dashboard Data
 
 on:
-  workflow_dispatch: {}        # manual "Run workflow" button
+  workflow_dispatch: {}        # Allows you to run this manually from the "Actions" tab
   schedule:
-    - cron: "*/30 * * * *"     # every 30 minutes (adjust as you like)
+    - cron: "*/30 * * * *"     # Runs automatically every 30 minutes
 
 jobs:
-  build:
+  build-and-commit:
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # allow committing the updated JSON
+      contents: write          # CRITICAL: Allows the action to commit files back to your repository
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
+          cache: "pip" # Caches dependencies for faster runs
 
-      - name: Install deps
-        run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install gspread google-auth pyyaml
-          fi
+      # This step correctly installs the dependencies needed by export_dashboard.py
+      - name: Install dependencies from root requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Export dashboard data
+      - name: Export dashboard data from Google Sheets
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: python export_dashboard.py
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }} # Uses the secret you set in GitHub
+        run: python export_dashboard.py # This creates docs/dashboard_data.json
 
-      - name: Commit & push updated dashboard data
+      # This critical step copies the latest data file into the chatbot's folder.
+      - name: Copy latest data for Chatbot Service
+        run: cp docs/dashboard_data.json chat_proxy/dashboard_data.json
+
+      - name: Commit and push updated data files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/dashboard_data.json docs/index.html || true
-          git commit -m "Update dashboard data [skip ci]" || echo "No changes to commit"
+          # Add all three files that might have been changed by the script
+          git add docs/dashboard_data.json docs/index.html chat_proxy/dashboard_data.json
+          # This line prevents empty commits if no data has changed
+          git diff --staged --quiet || git commit -m "Update dashboard data and assets [skip ci]"
           git push
+
