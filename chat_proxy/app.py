@@ -14,6 +14,7 @@ logging.basicConfig(level=logging.INFO)
 # --- Configuration & Secrets ---
 # MODIFICATION: Now uses the GEMINI_API_KEY from your Render Environment Group
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+logging.info(f"GEMINI_API_KEY value: {GEMINI_API_KEY}")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable must be set.")
 
