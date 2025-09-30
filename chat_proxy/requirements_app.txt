@@ -1,11 +1,24 @@
+# Flask and Server Setup
 Flask>=3.0.0
 flask-cors>=4.0.0
 gunicorn>=21.2.0
 waitress>=3.0.0
 
---- Google AI (Gemini) ---
+# Google AI (Gemini)
 google-generativeai>=0.5.4
 
---- RAG Model & Vector DB (Free Tier) ---
+# RAG Model & Vector DB (Free Tier)
 chromadb>=0.5.0
 sentence-transformers>=2.2.2
+
+# Utilities
+pyyaml>=6.0.1
+tenacity>=8.2.3
+requests>=2.31.0
+pandas>=2.1.0
+numpy>=1.26.0
+mutagen>=1.47.0
+
+# Optional (reports/digests)
+matplotlib>=3.7.2
+pillow>=10.0.0
