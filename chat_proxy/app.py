@@ -5,6 +5,8 @@ import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import chromadb
+# --- MODIFICATION ---
+# We no longer need SentenceTransformerEmbeddingFunction
 from chromadb.utils import embedding_functions
 
 # --- Basic Setup ---
@@ -12,11 +14,11 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # --- Configuration & Secrets ---
-# MODIFICATION: Now uses the GEMINI_API_KEY from your Render Environment Group
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-logging.info(f"GEMINI_API_KEY value: {GEMINI_API_KEY}")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable must be set.")
+# Log the key for debugging (optional, you can remove this in production)
+logging.info(f"GEMINI_API_KEY value: {GEMINI_API_KEY[:4]}...{GEMINI_API_KEY[-4:]}")
 
 # --- CORS Configuration ---
 CORS(app, resources={r"/chat": {"origins": "*"}}) 
@@ -24,12 +26,16 @@ CORS(app, resources={r"/chat": {"origins": "*"}})
 # --- AI & Vector DB Setup (The Core of the RAG Model) ---
 genai.configure(api_key=GEMINI_API_KEY)
 
-# The Retrieval part still uses the free, open-source model
-sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+# --- MODIFICATION ---
+# This now uses the lightweight Gemini API for embeddings instead of a heavy local model.
+# This is the key change that solves the memory issue.
+gemini_ef = embedding_functions.GoogleGenerativeAiEmbeddingFunction(api_key=GEMINI_API_KEY)
+
+# In-memory vector database using the Gemini embedding function.
 client = chromadb.Client()
 collection = client.get_or_create_collection(
-    name="meetings_collection", 
-    embedding_function=sentence_transformer_ef
+    name="meetings_collection_gemini", 
+    embedding_function=gemini_ef
 )
 
 # --- The "Brain" of the Chatbot: The System Prompt ---
@@ -65,8 +71,9 @@ def load_and_index_data():
             ids.append(str(i))
         
         if ids:
+            logging.info(f"Starting to index {len(documents)} documents. This may take a moment...")
             collection.add(documents=documents, metadatas=metadatas, ids=ids)
-            logging.info(f"Successfully indexed {len(documents)} meeting records.")
+            logging.info("Successfully indexed all meeting records.")
     except FileNotFoundError:
         logging.error(f"CRITICAL: '{data_path}' not found. The chatbot will not have context.")
     except Exception as e:
@@ -86,7 +93,7 @@ def chat():
         context_str = json.dumps(context_data, indent=2) if context_data else "[]"
         logging.info(f"Retrieved {len(context_data)} records for query.")
 
-        # --- MODIFICATION: RAG - GENERATION now uses Gemini ---
+        # RAG - GENERATION (using Gemini)
         prompt = f"{SYSTEM_PROMPT}\n\nCONTEXT:\n{context_str}\n\nQUESTION:\n{question}\n\nANSWER:"
         model = genai.GenerativeModel("gemini-2.5-flash-preview-05-20")
         resp = model.generate_content(prompt)
@@ -95,7 +102,6 @@ def chat():
         return jsonify({"answer": text})
 
     except Exception as e:
-        # This generic error handling will catch quota errors from Gemini
         logging.error(f"Chat processing error: {e}")
         detail = "The AI service is currently unavailable. This might be due to a rate limit."
         return jsonify({"error": "Failed to process chat request.", "detail": detail}), 500
@@ -105,4 +111,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     from waitress import serve
     serve(app, host="0.0.0.0", port=port)
-
