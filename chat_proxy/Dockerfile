@@ -14,7 +14,7 @@ COPY . /app/
 Install the Python dependencies from the app-specific requirements file.
 This ensures only the packages needed for the chatbot are installed.
 RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir -r requirements_app.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 Expose the port that Render will assign to the container. Gunicorn will listen on this port.
 EXPOSE 8080
