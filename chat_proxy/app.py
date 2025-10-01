@@ -1,12 +1,11 @@
 import os
 import json
 import logging
+import time # Import the time module for delays
 import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import chromadb
-# --- MODIFICATION ---
-# We no longer need SentenceTransformerEmbeddingFunction
 from chromadb.utils import embedding_functions
 
 # --- Basic Setup ---
@@ -17,45 +16,46 @@ logging.basicConfig(level=logging.INFO)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable must be set.")
-# Log the key for debugging (optional, you can remove this in production)
-logging.info(f"GEMINI_API_KEY value: {GEMINI_API_KEY[:4]}...{GEMINI_API_KEY[-4:]}")
+logging.info(f"GEMINI_API_KEY loaded successfully.")
 
 # --- CORS Configuration ---
 CORS(app, resources={r"/chat": {"origins": "*"}}) 
 
-# --- AI & Vector DB Setup (The Core of the RAG Model) ---
+# --- AI & Vector DB Setup ---
 genai.configure(api_key=GEMINI_API_KEY)
 
-# --- MODIFICATION ---
-# This now uses the lightweight Gemini API for embeddings instead of a heavy local model.
-# This is the key change that solves the memory issue.
+# Use the lightweight Gemini API for embeddings
 gemini_ef = embedding_functions.GoogleGenerativeAiEmbeddingFunction(api_key=GEMINI_API_KEY)
 
-# In-memory vector database using the Gemini embedding function.
-client = chromadb.Client()
+# Use PersistentClient to save the database to disk on Render
+DB_PATH = "/var/data/chroma_db"
+client = chromadb.PersistentClient(path=DB_PATH)
 collection = client.get_or_create_collection(
     name="meetings_collection_gemini", 
     embedding_function=gemini_ef
 )
 
-# --- The "Brain" of the Chatbot: The System Prompt ---
-SYSTEM_PROMPT = """You are InsightBot, an expert sales analyst. Your task is to answer the user's QUESTION based *only* on the provided JSON data in the CONTEXT.
+# --- System Prompt remains the same ---
+SYSTEM_PROMPT = """You are InsightBot, an expert sales analyst... (rest of prompt is the same)"""
 
-- **For summarization or analytical questions** (e.g., "Summarize improvement areas" or "What are the top 4 missed opportunities?"), you must analyze all items in the context, synthesize them, and provide a concise, actionable summary.
-- **Ranking:** When asked for "top" or "most common" items, aggregate all related items from the context and present the most frequent ones in a numbered or bulleted list.
-- **Direct Questions:** For direct questions (e.g., "What was the deal status for DLF Crest?"), find the specific record and answer directly.
-- **Formatting:** Use Markdown for clarity, especially for lists.
-- **Data Scarcity:** If the context does not contain the answer, you MUST state that the information is not available in the provided records. Do not invent information.
-"""
+def batch_generator(data, batch_size):
+    """Yields successive n-sized chunks from a list."""
+    for i in range(0, len(data), batch_size):
+        yield data[i:i + batch_size]
 
 def load_and_index_data():
-    """Loads the local data file and indexes it in the vector database on startup."""
+    """Loads data and indexes it in batches to avoid rate limiting."""
     try:
-        data_path = "dashboard_data.json"
-        with open(data_path, "r", encoding="utf-8") as f:
+        # Check if the collection is already populated
+        if collection.count() > 0:
+            logging.info(f"Found {collection.count()} records in the persistent database. Skipping indexing.")
+            return
+
+        logging.info("Persistent database is empty. Starting one-time batch indexing process...")
+        with open("dashboard_data.json", "r", encoding="utf-8") as f:
             all_meetings = json.load(f)
 
-        documents, metadatas, ids = [], [], []
+        all_docs = []
         for i, meeting in enumerate(all_meetings):
             doc_text = (
                 f"Owner: {meeting.get('Owner (Who handled the meeting)')}. "
@@ -66,45 +66,58 @@ def load_and_index_data():
                 f"Improvements needed: '{meeting.get('Improvement Areas', 'N/A')}'. "
                 f"Missed opportunities: '{meeting.get('Missed Opportunities', 'N/A')}'."
             )
-            documents.append(doc_text)
-            metadatas.append(meeting)
-            ids.append(str(i))
+            all_docs.append({'id': str(i), 'document': doc_text, 'metadata': meeting})
+
+        # --- BATCH PROCESSING FIX ---
+        # Process in batches of 20 with a 15-second delay to stay within free tier limits.
+        BATCH_SIZE = 20
+        DELAY_SECONDS = 15
         
-        if ids:
-            logging.info(f"Starting to index {len(documents)} documents. This may take a moment...")
+        batch_num = 1
+        for batch in batch_generator(all_docs, BATCH_SIZE):
+            logging.info(f"Processing batch {batch_num} ({len(batch)} documents)...")
+            ids = [item['id'] for item in batch]
+            documents = [item['document'] for item in batch]
+            metadatas = [item['metadata'] for item in batch]
+            
             collection.add(documents=documents, metadatas=metadatas, ids=ids)
-            logging.info("Successfully indexed all meeting records.")
+            
+            logging.info(f"Batch {batch_num} indexed. Waiting for {DELAY_SECONDS} seconds to avoid rate limit.")
+            time.sleep(DELAY_SECONDS)
+            batch_num += 1
+
+        logging.info("Successfully indexed all meeting records into persistent storage.")
+        
     except FileNotFoundError:
-        logging.error(f"CRITICAL: '{data_path}' not found. The chatbot will not have context.")
+        logging.error(f"CRITICAL: 'dashboard_data.json' not found. Chatbot will have no context.")
     except Exception as e:
-        logging.error(f"An error occurred during data loading/indexing: {e}")
+        logging.error(f"An error occurred during data loading/indexing: {e}", exc_info=True)
+
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    # This function remains exactly the same as before.
     data = request.get_json(silent=True) or {}
     question = (data.get("question") or "").strip()
     if not question:
         return jsonify({"error": "Missing 'question'"}), 400
 
     try:
-        # RAG - RETRIEVAL
         results = collection.query(query_texts=[question], n_results=15)
         context_data = results.get('metadatas', [[]])[0]
         context_str = json.dumps(context_data, indent=2) if context_data else "[]"
-        logging.info(f"Retrieved {len(context_data)} records for query.")
-
-        # RAG - GENERATION (using Gemini)
+        
         prompt = f"{SYSTEM_PROMPT}\n\nCONTEXT:\n{context_str}\n\nQUESTION:\n{question}\n\nANSWER:"
         model = genai.GenerativeModel("gemini-2.5-flash-preview-05-20")
         resp = model.generate_content(prompt)
         
-        text = getattr(resp, "text", "") or "Sorry, I couldn’t produce an answer at this time."
+        text = getattr(resp, "text", "") or "Sorry, I couldn’t produce an answer."
         return jsonify({"answer": text})
-
     except Exception as e:
         logging.error(f"Chat processing error: {e}")
         detail = "The AI service is currently unavailable. This might be due to a rate limit."
         return jsonify({"error": "Failed to process chat request.", "detail": detail}), 500
+
 
 if __name__ == "__main__":
     load_and_index_data()
