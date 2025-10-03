@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-import httpx
+import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import chromadb
@@ -13,13 +13,11 @@ CORS(app, resources={r"/chat": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO)
 
 # --- Configuration ---
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-GEMINI_API_KEY_CHATBOT = os.environ.get("GEMINI_API_KEY_CHATBOT")  # Optional fallback
-GEMINI_API_KEY_MEETINGS = os.environ.get("GEMINI_API_KEY_MEETINGS")  # Optional for other tasks
-
-if not OPENROUTER_API_KEY:
-    raise RuntimeError("OPENROUTER_API_KEY must be set in your Render Environment Group.")
-logging.info("OpenRouter API key loaded successfully.")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY must be set in your Render Environment Group.")
+genai.configure(api_key=GEMINI_API_KEY)
+logging.info("Gemini API key loaded successfully.")
 
 # --- Embedding Setup (Local SentenceTransformer) ---
 def get_embedding_function():
@@ -88,27 +86,11 @@ def chat():
         context_data = results.get('metadatas', [[]])[0]
         context_str = json.dumps(context_data, indent=2) if context_data else "[]"
 
-        response = httpx.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://your-site.com",
-                "X-Title": "Meeting Analysis Bot"
-            },
-            json={
-                "model": "deepseek/deepseek-chat-v3.1:free",
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"CONTEXT:\n{context_str}\n\nQUESTION:\n{question}"}
-                ]
-            },
-            timeout=180
-        )
-        response.raise_for_status()
-        api_data = response.json()
-        text = api_data['choices'][0]['message']['content'] or "Sorry, I couldn’t produce an answer."
-        return jsonify({"answer": text})
+        model = genai.GenerativeModel("gemini-pro")
+        chat_session = model.start_chat()
+        prompt = f"{SYSTEM_PROMPT}\n\nCONTEXT:\n{context_str}\n\nQUESTION:\n{question}"
+        response = chat_session.send_message(prompt)
+        return jsonify({"answer": response.text})
 
     except Exception as e:
         logging.error(f"Chat processing error: {e}", exc_info=True)
