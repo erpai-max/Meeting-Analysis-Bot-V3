@@ -20,7 +20,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 logging.info("Gemini API key loaded successfully.")
 
 # --- Embedding Setup (Local) ---
-local_ef = SentenceTransformerEmbeddingFunction(model_name="paraphrase-MiniLM-L3-v2")
+local_ef = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
 client = chromadb.Client()
 collection = client.get_or_create_collection(
     name="meetings_collection_local",
