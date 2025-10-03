@@ -19,16 +19,12 @@ if not GEMINI_API_KEY:
 genai.configure(api_key=GEMINI_API_KEY)
 logging.info("Gemini API key loaded successfully.")
 
-# --- Embedding Setup (Local SentenceTransformer) ---
-def get_embedding_function():
-    return embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="paraphrase-MiniLM-L3-v2"  # Lightweight model for Render free tier
-    )
-
+# --- Embedding Setup (Gemini) ---
+gemini_ef = embedding_functions.GoogleGenerativeAiEmbeddingFunction(api_key=GEMINI_API_KEY)
 client = chromadb.Client()
 collection = client.get_or_create_collection(
-    name="meetings_collection_local",
-    embedding_function=get_embedding_function()
+    name="meetings_collection_gemini",
+    embedding_function=gemini_ef
 )
 
 # --- System Prompt ---
@@ -65,7 +61,7 @@ def load_and_index_data():
             ids.append(str(i))
 
         if ids:
-            logging.info(f"Indexing {len(documents)} documents using local embeddings...")
+            logging.info(f"Indexing {len(documents)} documents using Gemini embeddings...")
             collection.add(documents=documents, metadatas=metadatas, ids=ids)
             logging.info("Successfully indexed all meeting records.")
     except FileNotFoundError:
