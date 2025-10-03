@@ -5,11 +5,11 @@ import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import chromadb
-from chromadb.utils import embedding_functions
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 # --- Basic Setup ---
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # Allow all origins for testing
+CORS(app, resources={r"/*": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO)
 
 # --- Configuration ---
@@ -19,12 +19,12 @@ if not GEMINI_API_KEY:
 genai.configure(api_key=GEMINI_API_KEY)
 logging.info("Gemini API key loaded successfully.")
 
-# --- Embedding Setup (Gemini) ---
-gemini_ef = embedding_functions.GoogleGenerativeAiEmbeddingFunction(api_key=GEMINI_API_KEY)
+# --- Embedding Setup (Local) ---
+local_ef = SentenceTransformerEmbeddingFunction(model_name="paraphrase-MiniLM-L3-v2")
 client = chromadb.Client()
 collection = client.get_or_create_collection(
-    name="meetings_collection_gemini",
-    embedding_function=gemini_ef
+    name="meetings_collection_local",
+    embedding_function=local_ef
 )
 
 # --- System Prompt ---
@@ -61,7 +61,7 @@ def load_and_index_data():
             ids.append(str(i))
 
         if ids:
-            logging.info(f"Indexing {len(documents)} documents using Gemini embeddings...")
+            logging.info(f"Indexing {len(documents)} documents using local embeddings...")
             collection.add(documents=documents, metadatas=metadatas, ids=ids)
             logging.info("Successfully indexed all meeting records.")
     except FileNotFoundError:
@@ -101,6 +101,11 @@ def chat():
     except Exception as e:
         logging.error(f"Chat processing error: {e}", exc_info=True)
         return jsonify({"error": f"Internal error: {str(e)}"}), 500
+
+# --- Health Check ---
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({"status": "Backend is alive"})
 
 # --- Server Start ---
 if __name__ == "__main__":
