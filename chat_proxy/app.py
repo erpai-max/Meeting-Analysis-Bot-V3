@@ -14,6 +14,9 @@ logging.basicConfig(level=logging.INFO)
 
 # --- Configuration ---
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+GEMINI_API_KEY_CHATBOT = os.environ.get("GEMINI_API_KEY_CHATBOT")  # Optional fallback
+GEMINI_API_KEY_MEETINGS = os.environ.get("GEMINI_API_KEY_MEETINGS")  # Optional for other tasks
+
 if not OPENROUTER_API_KEY:
     raise RuntimeError("OPENROUTER_API_KEY must be set in your Render Environment Group.")
 logging.info("OpenRouter API key loaded successfully.")
@@ -40,6 +43,7 @@ SYSTEM_PROMPT = """You are InsightBot, an expert sales analyst. Your task is to 
 - **Data Scarcity:** If the context does not contain the answer, you MUST state that the information is not available in the provided records. Do not invent information.
 """
 
+# --- Data Indexing ---
 def load_and_index_data():
     try:
         if collection.count() > 0:
@@ -71,6 +75,7 @@ def load_and_index_data():
     except Exception as e:
         logging.error(f"Error during data loading/indexing: {e}", exc_info=True)
 
+# --- Chat Endpoint ---
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
@@ -109,6 +114,7 @@ def chat():
         logging.error(f"Chat processing error: {e}", exc_info=True)
         return jsonify({"error": "Failed to process chat request."}), 500
 
+# --- Server Start ---
 if __name__ == "__main__":
     load_and_index_data()
     port = int(os.environ.get("PORT", 8080))
