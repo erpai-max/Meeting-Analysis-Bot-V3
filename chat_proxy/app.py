@@ -9,7 +9,7 @@ from chromadb.utils import embedding_functions
 
 # --- Basic Setup ---
 app = Flask(__name__)
-CORS(app, resources={r"/chat": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO)
 
 # --- Configuration ---
