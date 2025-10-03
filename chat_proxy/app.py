@@ -9,7 +9,7 @@ from chromadb.utils import embedding_functions
 
 # --- Basic Setup ---
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}})  # Allow all origins for testing
 logging.basicConfig(level=logging.INFO)
 
 # --- Configuration ---
@@ -65,7 +65,7 @@ def load_and_index_data():
             collection.add(documents=documents, metadatas=metadatas, ids=ids)
             logging.info("Successfully indexed all meeting records.")
     except FileNotFoundError:
-        logging.error("CRITICAL: 'dashboard_data.json' not found. Chatbot will have no context.")
+        logging.warning("dashboard_data.json not found. Proceeding without context.")
     except Exception as e:
         logging.error(f"Error during data loading/indexing: {e}", exc_info=True)
 
@@ -80,17 +80,27 @@ def chat():
     try:
         results = collection.query(query_texts=[question], n_results=15)
         context_data = results.get('metadatas', [[]])[0]
-        context_str = json.dumps(context_data, indent=2) if context_data else "[]"
+
+        if not context_data or not isinstance(context_data, dict):
+            logging.warning("No context found or context is malformed.")
+            return jsonify({"answer": "No relevant data found in context."})
+
+        context_str = json.dumps(context_data, indent=2)
 
         model = genai.GenerativeModel("gemini-pro")
         chat_session = model.start_chat()
         prompt = f"{SYSTEM_PROMPT}\n\nCONTEXT:\n{context_str}\n\nQUESTION:\n{question}"
         response = chat_session.send_message(prompt)
+
+        if not hasattr(response, "text"):
+            logging.error("Gemini response missing 'text' attribute.")
+            return jsonify({"error": "Gemini API failed to return a valid response."}), 500
+
         return jsonify({"answer": response.text})
 
     except Exception as e:
         logging.error(f"Chat processing error: {e}", exc_info=True)
-        return jsonify({"error": "Failed to process chat request."}), 500
+        return jsonify({"error": f"Internal error: {str(e)}"}), 500
 
 # --- Server Start ---
 if __name__ == "__main__":
