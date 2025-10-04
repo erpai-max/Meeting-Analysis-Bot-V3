@@ -1,33 +1,44 @@
 import os
 import json
 import logging
+import time # Import the time module for handling rate limits
 import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+from chromadb.utils import embedding_functions
 
 # --- Basic Setup ---
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO)
 
-# --- Configuration ---
+# --- Configuration & Secrets ---
+# This pulls the dedicated chatbot API key from your Render Environment Group.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY must be set in your Render Environment Group.")
-genai.configure(api_key=GEMINI_API_KEY)
-logging.info("Gemini API key loaded successfully.")
+    raise RuntimeError("GEMINI_API_KEY environment variable must be set.")
+logging.info("GEMINI_API_KEY loaded successfully.")
 
-# --- Embedding Setup (Local) ---
-local_ef = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+# --- CORS Configuration ---
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# --- AI & Vector DB Setup (The Core of the RAG Model) ---
+genai.configure(api_key=GEMINI_API_KEY)
+
+# --- MEMORY FIX ---
+# This now uses the lightweight Gemini API for embeddings instead of a heavy local model.
+# This is the key change that solves the "Out of memory" error.
+gemini_ef = embedding_functions.GoogleGenerativeAiEmbeddingFunction(api_key=GEMINI_API_KEY)
+
+# --- PERMISSION FIX ---
+# Use an in-memory client. This avoids all filesystem permission errors on Render's free tier.
 client = chromadb.Client()
 collection = client.get_or_create_collection(
-    name="meetings_collection_local",
-    embedding_function=local_ef
+    name="meetings_collection_gemini", 
+    embedding_function=gemini_ef
 )
 
-# --- System Prompt ---
+# --- The "Brain" of the Chatbot: The System Prompt ---
 SYSTEM_PROMPT = """You are InsightBot, an expert sales analyst. Your task is to answer the user's QUESTION based *only* on the provided JSON data in the CONTEXT.
 
 - **For summarization or analytical questions** (e.g., "Summarize improvement areas" or "What are the top 4 missed opportunities?"), you must first analyze all items in the context, synthesize them, and provide a concise, actionable summary.
@@ -37,39 +48,61 @@ SYSTEM_PROMPT = """You are InsightBot, an expert sales analyst. Your task is to 
 - **Data Scarcity:** If the context does not contain the answer, you MUST state that the information is not available in the provided records. Do not invent information.
 """
 
-# --- Data Indexing ---
+def batch_generator(data, batch_size):
+    """Yields successive n-sized chunks from a list."""
+    for i in range(0, len(data), batch_size):
+        yield data[i:i + batch_size]
+
 def load_and_index_data():
+    """Loads data and indexes it in batches to avoid API rate limiting on startup."""
     try:
         if collection.count() > 0:
-            logging.info(f"Index already contains {collection.count()} records. Skipping.")
+            logging.info(f"Index already contains {collection.count()} records. Skipping re-indexing.")
             return
 
-        logging.info("Index is empty. Starting one-time indexing process...")
+        logging.info("In-memory index is empty. Starting one-time batch indexing process...")
         with open("dashboard_data.json", "r", encoding="utf-8") as f:
             all_meetings = json.load(f)
 
-        documents, metadatas, ids = [], [], []
+        all_docs = []
         for i, meeting in enumerate(all_meetings):
             doc_text = (
                 f"Owner: {meeting.get('Owner (Who handled the meeting)')}. "
                 f"Society: {meeting.get('Society Name')}. "
                 f"Deal Status: {meeting.get('Deal Status')}. "
                 f"Score: {meeting.get('% Score')}. "
+                f"Summary: Risks were '{meeting.get('Risks / Unresolved Issues', 'N/A')}'. "
+                f"Improvements needed: '{meeting.get('Improvement Areas', 'N/A')}'. "
+                f"Missed opportunities: '{meeting.get('Missed Opportunities', 'N/A')}'."
             )
-            documents.append(doc_text)
-            metadatas.append(meeting)
-            ids.append(str(i))
+            all_docs.append({'id': str(i), 'document': doc_text, 'metadata': meeting})
 
-        if ids:
-            logging.info(f"Indexing {len(documents)} documents using local embeddings...")
+        # --- RATE LIMIT FIX ---
+        # Process in small batches with a delay to stay within the Gemini API's free tier limits.
+        BATCH_SIZE = 20
+        DELAY_SECONDS = 20 # A safe delay to respect free tier limits
+        
+        batch_num = 1
+        for batch in batch_generator(all_docs, BATCH_SIZE):
+            logging.info(f"Processing batch {batch_num} ({len(batch)} documents)...")
+            ids = [item['id'] for item in batch]
+            documents = [item['document'] for item in batch]
+            metadatas = [item['metadata'] for item in batch]
+            
             collection.add(documents=documents, metadatas=metadatas, ids=ids)
-            logging.info("Successfully indexed all meeting records.")
-    except FileNotFoundError:
-        logging.warning("dashboard_data.json not found. Proceeding without context.")
-    except Exception as e:
-        logging.error(f"Error during data loading/indexing: {e}", exc_info=True)
+            
+            logging.info(f"Batch {batch_num} indexed. Waiting for {DELAY_SECONDS} seconds...")
+            time.sleep(DELAY_SECONDS)
+            batch_num += 1
 
-# --- Chat Endpoint ---
+        logging.info("Successfully indexed all meeting records into memory.")
+        
+    except FileNotFoundError:
+        logging.error(f"CRITICAL: 'dashboard_data.json' not found. Chatbot will have no context.")
+    except Exception as e:
+        logging.error(f"An error occurred during data loading/indexing: {e}", exc_info=True)
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
@@ -78,36 +111,29 @@ def chat():
         return jsonify({"error": "Missing 'question'"}), 400
 
     try:
+        # RAG - RETRIEVAL
         results = collection.query(query_texts=[question], n_results=15)
         context_data = results.get('metadatas', [[]])[0]
-
-        if not context_data or not isinstance(context_data, dict):
-            logging.warning("No context found or context is malformed.")
-            return jsonify({"answer": "No relevant data found in context."})
-
-        context_str = json.dumps(context_data, indent=2)
-
-        model = genai.GenerativeModel("gemini-pro")
-        chat_session = model.start_chat()
-        prompt = f"{SYSTEM_PROMPT}\n\nCONTEXT:\n{context_str}\n\nQUESTION:\n{question}"
-        response = chat_session.send_message(prompt)
-
-        if not hasattr(response, "text"):
-            logging.error("Gemini response missing 'text' attribute.")
-            return jsonify({"error": "Gemini API failed to return a valid response."}), 500
-
-        return jsonify({"answer": response.text})
+        context_str = json.dumps(context_data, indent=2) if context_data else "[]"
+        
+        # RAG - GENERATION (using Gemini)
+        prompt = f"{SYSTEM_PROMPT}\n\nCONTEXT:\n{context_str}\n\nQUESTION:\n{question}\n\nANSWER:"
+        model = genai.GenerativeModel("gemini-2.5-flash-preview-05-20")
+        resp = model.generate_content(prompt)
+        
+        text = getattr(resp, "text", "") or "Sorry, I couldn’t produce an answer."
+        return jsonify({"answer": text})
 
     except Exception as e:
-        logging.error(f"Chat processing error: {e}", exc_info=True)
-        return jsonify({"error": f"Internal error: {str(e)}"}), 500
+        logging.error(f"Chat processing error: {e}")
+        detail = "The AI service is currently unavailable. This might be due to a rate limit."
+        return jsonify({"error": "Failed to process chat request.", "detail": detail}), 500
 
 # --- Health Check ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "Backend is alive"})
 
-# --- Server Start ---
 if __name__ == "__main__":
     load_and_index_data()
     port = int(os.environ.get("PORT", 8080))
