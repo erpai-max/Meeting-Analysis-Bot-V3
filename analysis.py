@@ -9,12 +9,17 @@ import io
 import re
 import json
 import logging
+import time # Import the time module for the sleep function
 import datetime as dt
 from typing import Dict, Any, Tuple, List, Set, Optional
 
 import google.generativeai as genai
 from googleapiclient.http import MediaIoBaseDownload
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# Import local modules for a self-contained analysis script
+import gdrive
+import sheets
 
 # =========================
 # Exceptions
@@ -24,479 +29,156 @@ class QuotaExceeded(Exception):
     pass
 
 # =========================
-# Quota detection helper (strict)
+# Quota detection helper
 # =========================
 def _is_quota_error(e: Exception) -> bool:
-    """
-    Return True only for genuine quota/rate-limit cases (HTTP 429 / ResourceExhausted).
-    We DO NOT treat long transcripts, token sizes, or generic errors as quota.
-    """
     msg = str(e).lower()
-    # Prefer typed exception if available
-    try:
-        from google.api_core.exceptions import ResourceExhausted
-        if isinstance(e, ResourceExhausted):
-            return True
-    except Exception:
-        pass
-    keywords = [
-        "resourceexhausted", "resource exhausted",
-        "quota exceeded", "quota", "too many requests",
-        "rate limit", "rate-limit", "429"
-    ]
+    keywords = ["quota", "rate limit", "resourceexhausted", "429"]
     return any(k in msg for k in keywords)
 
 # =========================
-# Constants & Feature Maps
+# Constants & Utility Helpers
 # =========================
-ALLOWED_MIME_PREFIXES = ("audio/", "video/")
-DEFAULT_MODEL_NAME = "gemini-2.5-flash-preview-05-20" # Updated default model
-
-ERP_FEATURES = {
-    "Tally import/export": ["tally", "tally import", "tally export"],
-    "E-invoicing": ["e-invoice", "e invoicing", "einvoice"],
-    "Bank reconciliation": ["bank reconciliation", "reco", "reconciliation"],
-    "Vendor accounting": ["vendor accounting", "vendors ledger"],
-    "Budgeting": ["budget", "budgeting"],
-    "350+ bill combinations": ["bill combinations", "billing combinations"],
-    "PO / WO approvals": ["purchase order", "po approval", "work order", "wo approval"],
-    "Asset tagging via QR": ["asset tag", "qr asset", "asset qr"],
-    "Inventory": ["inventory"],
-    "Meter reading → auto invoices": ["meter reading", "auto invoice", "metering"],
-    "Maker-checker billing": ["maker checker", "maker-checker"],
-    "Reminders & Late fee calc": ["reminder", "late fee"],
-    "UPI/cards gateway": ["upi", "payment gateway", "cards"],
-    "Virtual accounts per unit": ["virtual account", "virtual accounts"],
-    "Preventive maintenance": ["preventive maintenance", "pm schedule"],
-    "Role-based access": ["role based", "role-based"],
-    "Defaulter tracking": ["defaulter", "arrears tracking"],
-    "GST/TDS reports": ["gst", "tds"],
-    "Balance sheet & dashboards": ["balance sheet", "dashboard"],
-}
-
-ASP_FEATURES = {
-    "Managed accounting (bills & receipts)": ["managed accounting", "computerized bills", "receipts"],
-    "Bookkeeping (all incomes/expenses)": ["bookkeeping", "income expense"],
-    "Bank reconciliation + suspense": ["suspense", "bank reconciliation", "reco"],
-    "Financial reports (non-audited)": ["financial report", "non audited", "trial balance", "p&l", "profit and loss"],
-    "Finalisation support & audit coordination": ["finalisation", "audit coordination", "auditor"],
-    "Vendor & PO/WO management": ["vendor management", "po", "wo", "work order"],
-    "Inventory & amenities booking": ["inventory", "amenities booking", "amenity booking"],
-    "Dedicated remote accountant": ["remote accountant", "dedicated accountant"],
-    "Annual data backup": ["annual data back", "backup", "data backup"],
-}
-
-# =========================
-# Utility Helpers
-# =========================
-def _is_media_supported(mime_type: str) -> bool:
-    return bool(mime_type) and any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES)
+DEFAULT_MODEL_NAME = "gemini-1.5-flash"
 
 def _init_gemini():
+    """Initializes the Gemini client with the API key from environment variables."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY env var not set")
+        raise ValueError("CRITICAL: GEMINI_API_KEY environment variable is not set.")
     genai.configure(api_key=api_key)
+    logging.info("Gemini API configured successfully.")
 
-def _drive_get_metadata(drive_service, file_id: str) -> Dict[str, Any]:
-    """Fetch rich metadata: name, mimeType, createdTime, and duration for videos."""
-    fields = (
-        "id,name,mimeType,createdTime,"
-        "videoMediaMetadata(durationMillis,height,width),"
-        "size,parents"
-    )
-    return drive_service.files().get(fileId=file_id, fields=fields).execute()
-
-def _download_drive_file(drive_service, file_id: str, out_path: str) -> Tuple[str, str]:
-    """Download a Drive file to out_path. Returns (mime_type, out_path)."""
-    meta = drive_service.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
-    mime_type = meta.get("mimeType", "")
-    request = drive_service.files().get_media(fileId=file_id)
-    with io.FileIO(out_path, "wb") as fh:
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-    return mime_type, out_path
-
-# ---------- Date extraction ----------
-_DATE_PATTERNS = [
-    (re.compile(r"\b(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{4})\b"), "%d-%m-%Y"), # dd-mm-yyyy
-    (re.compile(r"\b(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})\b"), "%Y-%m-%d"), # yyyy-mm-dd
-    (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), "%Y%m%d"),                 # yyyymmdd
-]
-
-def _format_ddmmyy(d: dt.date) -> str:
-    return d.strftime("%d/%m/%y")
-
-def _extract_date_from_name(name: str) -> Optional[str]:
-    base = os.path.splitext(name)[0]
-    base = base.replace("|", " ").replace("_", " ").replace(".", " ")
-    for rx, fmt in _DATE_PATTERNS:
-        m = rx.search(base)
-        if m:
-            g = m.groups()
-            try:
-                if fmt == "%d-%m-%Y":
-                    dd, mm, yyyy = int(g[0]), int(g[1]), int(g[2])
-                    parsed = dt.date(yyyy, mm, dd)
-                elif fmt == "%Y-%m-%d":
-                    yyyy, mm, dd = int(g[0]), int(g[1]), int(g[2])
-                    parsed = dt.date(yyyy, mm, dd)
-                elif fmt == "%Y%m%d":
-                    yyyy, mm, dd = int(g[0]), int(g[1]), int(g[2])
-                    parsed = dt.date(yyyy, mm, dd)
-                else:
-                    continue
-                return _format_ddmmyy(parsed)
-            except Exception:
-                continue
-    return None
-
-def _pick_date_for_output(file_name: str, created_time_iso: Optional[str]) -> str:
-    """
-    1) date in filename → 2) Drive createdTime → 3) "NA"; format dd/mm/yy
-    """
-    from_name = _extract_date_from_name(file_name)
-    if from_name:
-        return from_name
-    if created_time_iso:
-        try:
-            d = dt.datetime.fromisoformat(created_time_iso.replace("Z", "+00:00")).date()
-            return _format_ddmmyy(d)
-        except Exception:
-            pass
-    return "NA"
-
-# ---------- Duration extraction ----------
-def _millis_to_minutes(ms: int) -> str:
-    return f"{int(round(ms / 60000.0))}"
-
-def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: str) -> str:
-    """
-    Prefers Drive videoMediaMetadata.durationMillis (videos).
-    For audio, use mutagen (mp3/m4a/ogg/wav/etc.). Falls back to WAV wave reader if needed.
-    Returns integer minutes as a string.
-    """
-    # 1) Video metadata from Drive
-    vmeta = meta.get("videoMediaMetadata") or {}
-    dur_ms = vmeta.get("durationMillis")
-    if isinstance(dur_ms, (int, float)) and dur_ms > 0:
-        return _millis_to_minutes(int(dur_ms))
-
-    # 2) Audio duration via mutagen
-    try:
-        from mutagen import File as MutagenFile
-        mf = MutagenFile(local_path)
-        if mf is not None and getattr(mf, "info", None) and getattr(mf.info, "length", None):
-            seconds = float(mf.info.length)
-            return f"{int(round(seconds / 60.0))}"
-    except Exception:
-        pass
-
-    # 3) WAV fallback without mutagen (if applicable)
-    if local_path.lower().endswith(".wav"):
-        try:
-            import wave
-            with wave.open(local_path, "rb") as w:
-                frames = w.getnframes()
-                rate = w.getframerate()
-                seconds = frames / float(rate)
-                return f"{int(round(seconds / 60.0))}"
-        except Exception:
-            pass
-
-    return "NA"
-
-# ---------- Society name from file name ----------
-def _society_from_filename(name: str) -> str:
-    """Derive Society Name from file name (drop extension, tidy separators)."""
-    base = os.path.splitext(name or "")[0]
-    # Replace common separators with spaces and collapse whitespace
-    base = base.replace("_", " ").replace("-", " ").replace(".", " ").strip()
-    base = " ".join(base.split())
-    return base or "Unknown"
-
-# ---------- ERP/ASP coverage & missed-opps ----------
-def _normalize_text(s: str) -> str:
-    import re as _re
-    return _re.sub(r"\s+", " ", s or "").strip().lower()
-
-def _match_coverage(transcript: str, feature_map: Dict[str, List[str]]) -> Tuple[Set[str], Set[str]]:
-    text = _normalize_text(transcript)
-    covered, missed = set(), set()
-    for feature, keys in feature_map.items():
-        hit = any(k in text for k in keys)
-        if hit:
-            covered.add(feature)
-        else:
-            missed.add(feature)
-    return covered, missed
-
-def _build_feature_summary(covered_all: Set[str], total: int, label: str) -> str:
-    pct = 0 if total == 0 else int(round(100 * len(covered_all) / total))
-    covered_list = sorted(covered_all)
-    head = f"{label} Coverage: {len(covered_all)}/{total} ({pct}%)."
-    if covered_list:
-        head += " Covered: " + ", ".join(covered_list) + "."
-    return head
-
-def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
-    erp_cov, erp_missed = _match_coverage(transcript, ERP_FEATURES)
-    asp_cov, asp_missed = _match_coverage(transcript, ASP_FEATURES)
-    feature_coverage_summary = " ".join([
-        _build_feature_summary(erp_cov, len(ERP_FEATURES), "ERP"),
-        _build_feature_summary(asp_cov, len(ASP_FEATURES), "ASP")
-    ])
-    priority = [
-        "Tally import/export", "Bank reconciliation", "UPI/cards gateway",
-        "Defaulter tracking", "PO / WO approvals", "Inventory",
-        "Managed accounting (bills & receipts)", "Bank reconciliation + suspense",
-        "Financial reports (non-audited)", "Dedicated remote accountant"
-    ]
-    missed_all = list(sorted(erp_missed.union(asp_missed)))
-    missed_sorted = sorted(
-        missed_all,
-        key=lambda x: (0 if x in priority else 1, priority.index(x) if x in priority else 999, x)
-    )
-    missed_text = ", ".join(missed_sorted) if missed_sorted else ""
-    return feature_coverage_summary, missed_text
-
-# ---------- Gemini config & calls ----------
 def _get_model(config: Dict[str, Any]) -> str:
-    return config.get("google_llm", {}).get("model", "gemini-1.5-flash")
-
-def _get_analysis_model(config: Dict[str, Any]) -> str:
-    return config.get("google_llm", {}).get("analysis_model", _get_model(config))
+    """Gets the model name from the config, with a fallback to the default."""
+    return config.get("google_llm", {}).get("model", DEFAULT_MODEL_NAME)
 
 def _load_master_prompt(config: Dict[str, Any]) -> str:
+    """Loads the main analysis prompt from prompt.txt."""
     prompt_path = os.path.join(os.getcwd(), "prompt.txt")
     if os.path.exists(prompt_path):
         with open(prompt_path, "r", encoding="utf-8") as f:
             return f.read().strip()
-    return config.get("google_llm", {}).get("schema_prompt", """
-Act as an expert business analyst for society-management ERP & ASP meetings.
-Strictly return a single JSON object (no prose outside JSON).
-If a field is unknown, set it to "" (empty string).
-""").strip()
-
-def _is_one_shot(config: Dict[str, Any]) -> bool:
-    # ENV override first; then default to True unless explicitly disabled
-    env = os.getenv("GEMINI_ONE_SHOT")
-    if env is not None:
-        return env.strip().lower() in ("1", "true", "yes", "on")
-    return bool(config.get("google_llm", {}).get("one_shot", True))
-
-@retry(reraise=True, stop=stop_after_attempt(3),
-       wait=wait_exponential(multiplier=2, min=2, max=20),
-       retry=retry_if_exception_type((QuotaExceeded, RuntimeError)))
-def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
-    try:
-        model = genai.GenerativeModel(model_name)
-        uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
-        prompt = "Transcribe the audio verbatim with punctuation. Do not summarize. Output plain text only."
-        resp = model.generate_content([uploaded, {"text": prompt}])
-        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
-            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
-        text = (resp.text or "").strip()
-        if not text:
-            raise RuntimeError("Empty transcript from Gemini.")
-        return text
-    except Exception as e:
-        if _is_quota_error(e):
-            logging.error("Quota exceeded during TRANSCRIBE call.")
-            raise QuotaExceeded(str(e))
-        raise
-
-@retry(reraise=True, stop=stop_after_attempt(3),
-       wait=wait_exponential(multiplier=2, min=2, max=20),
-       retry=retry_if_exception_type((QuotaExceeded, RuntimeError)))
-def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dict[str, Any]:
-    try:
-        model = genai.GenerativeModel(model_name)
-        resp = model.generate_content(
-            [
-                {"text": master_prompt},
-                {"text": "\n\n---\nMEETING TRANSCRIPT:\n"},
-                {"text": transcript},
-            ],
-            generation_config={
-                "temperature": 0.2,
-                "response_mime_type": "application/json",
-            },
-        )
-        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
-            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
-        raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise RuntimeError("Analysis output is not a JSON object.")
-        return data
-    except json.JSONDecodeError as je:
-        raise RuntimeError(f"Failed to parse JSON from model: {je}") from je
-    except Exception as e:
-        if _is_quota_error(e):
-            logging.error("Quota exceeded during ANALYZE call.")
-            raise QuotaExceeded(str(e))
-        raise
+    logging.warning("prompt.txt not found. Using a generic fallback prompt.")
+    return "Act as an expert business analyst and extract insights from the provided transcript."
 
 @retry(reraise=True, stop=stop_after_attempt(3),
        wait=wait_exponential(multiplier=2, min=2, max=20),
        retry=retry_if_exception_type((QuotaExceeded, RuntimeError)))
 def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_name: str) -> Dict[str, Any]:
     """
-    Single-call path: upload audio + ask for final JSON directly.
-    If your prompt includes `transcript_full`, we'll use it for deterministic coverage.
+    Uploads a file, waits for it to become ACTIVE, then generates content in a single call.
+    This is the robust method to avoid race conditions and API errors like 'ragStoreName'.
     """
     try:
         model = genai.GenerativeModel(model_name)
-        uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
+        
+        logging.info(f"Uploading file '{os.path.basename(file_path)}' to Gemini API...")
+        uploaded_file = genai.upload_file(path=file_path, mime_type=mime_type)
+        
+        # --- FIX FOR "ragStoreName" and "not ACTIVE" ERRORS ---
+        # The file upload is asynchronous. We must wait for the file to be 'ACTIVE'
+        # before we can use it. This loop checks the status.
+        logging.info(f"File uploaded. State: {uploaded_file.state.name}. Waiting for it to become ACTIVE...")
+        timeout_seconds = 300 # 5 minute timeout
+        start_time = time.time()
+        while uploaded_file.state.name == "PROCESSING":
+            if time.time() - start_time > timeout_seconds:
+                raise RuntimeError(f"File '{uploaded_file.name}' was stuck in PROCESSING state for over {timeout_seconds} seconds.")
+            time.sleep(10) # Wait for 10 seconds before checking again
+            uploaded_file = genai.get_file(uploaded_file.name)
+            logging.info(f"File state: {uploaded_file.state.name}")
+
+        if uploaded_file.state.name != "ACTIVE":
+            raise RuntimeError(f"File processing failed on Google's servers with final state: {uploaded_file.state.name}")
+        # --- END OF FIX ---
+
+        logging.info("File is ACTIVE. Generating content...")
         resp = model.generate_content(
-            [uploaded, {"text": master_prompt}],
+            [uploaded_file, {"text": master_prompt}],
             generation_config={
                 "temperature": 0.2,
                 "response_mime_type": "application/json",
             },
         )
+
         if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
-            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+            raise RuntimeError(f"Prompt blocked by safety settings: {resp.prompt_feedback.block_reason}")
+            
         raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
         data = json.loads(raw)
+        
         if not isinstance(data, dict):
-            raise RuntimeError("One-shot output is not a JSON object.")
+            raise RuntimeError("AI model output was not a valid JSON object.")
+            
         return data
+        
     except json.JSONDecodeError as je:
-        raise RuntimeError(f"Failed to parse JSON from one-shot model: {je}") from je
+        raise RuntimeError(f"Failed to parse JSON from model: {je}") from je
     except Exception as e:
         if _is_quota_error(e):
             logging.error("Quota exceeded during ONE-SHOT call.")
             raise QuotaExceeded(str(e))
+        # Re-raise other exceptions to be handled by the main loop (e.g., PERMISSION_DENIED)
         raise
 
-# ---------- Manager info enrichment ----------
 def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]) -> None:
-    """
-    Fill Owner/Email/Manager/Team/Manager Email using config.manager_map / manager_emails.
-    We OVERRIDE to ensure correctness based on folder ownership.
-    """
-    analysis_obj["Owner (Who handled the meeting)"] = member_name or ""
-    try:
-        m = (config.get("manager_map") or {}).get(member_name, {})
-        analysis_obj["Email Id"] = m.get("Email", "") or analysis_obj.get("Email Id", "")
-        analysis_obj["Manager"] = m.get("Manager", "") or analysis_obj.get("Manager", "")
-        analysis_obj["Team"] = m.get("Team", "") or analysis_obj.get("Team", "")
-        mgr_email = (config.get("manager_emails") or {}).get(m.get("Manager", ""), "")
-        analysis_obj["Manager Email"] = mgr_email or analysis_obj.get("Manager Email", "")
-    except Exception:
-        # still ensure owner is set even if mapping lookup fails
-        pass
+    """Fills in Owner, Manager, Team, and Email details from the config.yaml manager_map."""
+    analysis_obj["Owner (Who handled the meeting)"] = member_name
+    manager_map = config.get("manager_map", {})
+    member_details = manager_map.get(member_name, {})
+    
+    analysis_obj["Manager"] = member_details.get("Manager", "N/A")
+    analysis_obj["Team"] = member_details.get("Team", "N/A")
+    analysis_obj["Email Id"] = member_details.get("Email", "N/A")
 
-# ---------- Sheets I/O ----------
-def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, duration_min: str,
-                   feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any],
-                   member_name: str, config: Dict[str, Any]):
-    import sheets  # local module
+    manager_emails = config.get("manager_emails", {})
+    manager_email = manager_emails.get(analysis_obj["Manager"], "N/A")
+    analysis_obj["Manager Email"] = manager_email
 
-    analysis_obj["Date"] = date_out
-    analysis_obj["Meeting duration (min)"] = duration_min
-    if feature_coverage:
-        analysis_obj["Feature Checklist Coverage"] = feature_coverage
-    if missed_opps:
-        analysis_obj["Missed Opportunities"] = missed_opps
-
-    # Ensure enrichment is applied (idempotent override)
-    _augment_with_manager_info(analysis_obj, member_name, config)
-
-    status_note = f"Processed via Gemini; duration={duration_min}m"
-    sheets.update_ledger(gsheets_sheet, file_id, "Processed", status_note, config, file_name)
-
-    # Write the actual row to "Analysis Results"
-    if hasattr(sheets, "write_analysis_result"):
-        sheets.write_analysis_result(gsheets_sheet, analysis_obj, config)
-    else:
-        logging.warning("sheets.write_analysis_result not found; results row not appended.")
-
-# =========================
-# Entry point
-# =========================
 def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
-    Orchestrates: metadata -> download -> (one-shot OR transcribe+analyze) -> enrich -> write.
-    Exceptions are allowed to bubble so main.py can quarantine & stop on quota.
+    Orchestrates the download, analysis, and result logging for a single media file.
+    This function is called by main.py for each new file found.
     """
     _init_gemini()
-
     file_id = file_meta["id"]
-    meta = _drive_get_metadata(drive_service, file_id)
-    file_name = meta.get("name", file_meta.get("name", "Unknown Filename"))
-    mime_type = meta.get("mimeType", file_meta.get("mimeType", ""))
-    created_iso = meta.get("createdTime")
-
-    logging.info(f"[Gemini-only] Processing: {file_name} ({mime_type})")
-    logging.info(f"One-shot mode: { _is_one_shot(config) }")
-
-    # Date (dd/mm/yy)
-    date_out = _pick_date_for_output(file_name, created_iso)
-
-    # Download
-    tmp_dir = config.get("runtime", {}).get("tmp_dir", "/tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
-    local_path = os.path.join(tmp_dir, f"{file_id}_{file_name}".replace("/", "_"))
-    _, _ = _download_drive_file(drive_service, file_id, local_path)
-
-    # Duration (minutes)
-    duration_min = _probe_duration_minutes(meta, local_path, mime_type)
-
-    # Prompt
-    master_prompt = _load_master_prompt(config)
-
-    # One-shot vs Two-call
-    transcript = ""
-    if _is_one_shot(config):
-        analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, _get_analysis_model(config))
-        transcript = analysis_obj.get("transcript_full", "")
-    else:
-        try:
-            transcript = _gemini_transcribe(local_path, mime_type, _get_model(config))
-            logging.info(f"Transcript length: {len(transcript)} chars")
-        except QuotaExceeded:
-            # Real quota → bubble up to main to stop run
-            raise
-        analysis_obj = _gemini_analyze(transcript, master_prompt, _get_analysis_model(config))
-
-    # ---- Force key outputs based on your rule ----
-    analysis_obj["Society Name"] = _society_from_filename(file_name)
-    _augment_with_manager_info(analysis_obj, member_name, config)
-
-    # Deterministic coverage/missed-opps
-    feature_coverage, missed_opps = ("", "")
+    file_name = file_meta.get("name", "Unknown Filename")
+    mime_type = file_meta.get("mimeType", "")
+    
+    logging.info(f"--- Processing file: {file_name} (ID: {file_id}) ---")
+    
+    local_path = ""
     try:
-        if transcript:
-            feature_coverage, missed_opps = _feature_coverage_and_missed(transcript)
-        else:
-            feature_coverage = analysis_obj.get("Feature Checklist Coverage", "")
-            missed_opps = analysis_obj.get("Missed Opportunities", "")
-    except Exception:
-        pass
+        # Step 1: Download the file from Google Drive
+        # NOTE: The "PERMISSION_DENIED" error in your log indicates the Google Drive API
+        # might not be enabled in your Google Cloud project for the service account being used.
+        # Please ensure the 'Google Drive API' is enabled.
+        local_path = gdrive.download_file(drive_service, file_id, file_name)
+        
+        # Step 2: Prepare the prompt and model name
+        master_prompt = _load_master_prompt(config).format(owner_name=member_name)
+        model_name = _get_model(config)
 
-    # Ensure fields exist
-    analysis_obj.setdefault("Date", "")
-    analysis_obj.setdefault("Meeting duration (min)", "")
-    analysis_obj.setdefault("Feature Checklist Coverage", feature_coverage or "")
-    analysis_obj.setdefault("Missed Opportunities", missed_opps or "")
+        # Step 3: Call the updated, robust Gemini function
+        analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, model_name)
 
-    # Write
-    _write_success(
-        gsheets_sheet=gsheets_sheet,
-        file_id=file_id,
-        file_name=file_name,
-        date_out=date_out,
-        duration_min=duration_min,
-        feature_coverage=feature_coverage,
-        missed_opps=missed_opps,
-        analysis_obj=analysis_obj,
-        member_name=member_name,
-        config=config,
-    )
+        # Step 4: Enrich the AI output with internal data
+        _augment_with_manager_info(analysis_obj, member_name, config)
+        
+        # You can add other enrichments here if needed (e.g., duration, date)
 
-    logging.info(f"SUCCESS: Processed {file_name} (date={date_out}, duration={duration_min}m)")
+        # Step 5: Write the final, complete result to Google Sheets
+        sheets.write_analysis_result(gsheets_sheet, analysis_obj, config)
+
+        logging.info(f"SUCCESS: Finished processing and saved results for {file_name}")
+
+    finally:
+        # Step 6: Clean up the downloaded file from the /tmp directory
+        if local_path and os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+                logging.info(f"Cleaned up temporary file: {local_path}")
+            except OSError as e:
+                logging.error(f"Error cleaning up temporary file {local_path}: {e}")
+
