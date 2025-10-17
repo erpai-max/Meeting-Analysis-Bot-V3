@@ -37,9 +37,46 @@ def _is_quota_error(e: Exception) -> bool:
     return any(k in msg for k in keywords)
 
 # =========================
-# Constants & Utility Helpers
+# Constants & Feature Maps
 # =========================
 DEFAULT_MODEL_NAME = "gemini-1.5-flash"
+
+# --- FEATURE CHECKLISTS (RE-INTEGRATED) ---
+# This "checklist" is used to automatically scan the transcript for key talking points.
+ERP_FEATURES = {
+    "Tally import/export": ["tally", "tally import", "tally export"],
+    "E-invoicing": ["e-invoice", "e invoicing", "einvoice"],
+    "Bank reconciliation": ["bank reconciliation", "reco", "reconciliation"],
+    "Vendor accounting": ["vendor accounting", "vendors ledger"],
+    "Budgeting": ["budget", "budgeting"],
+    "350+ bill combinations": ["bill combinations", "billing combinations"],
+    "PO / WO approvals": ["purchase order", "po approval", "work order", "wo approval"],
+    "Asset tagging via QR": ["asset tag", "qr asset", "asset qr"],
+    "Inventory": ["inventory"],
+    "Meter reading → auto invoices": ["meter reading", "auto invoice", "metering"],
+    "Maker-checker billing": ["maker checker", "maker-checker"],
+    "Reminders & Late fee calc": ["reminder", "late fee"],
+    "UPI/cards gateway": ["upi", "payment gateway", "cards"],
+    "Virtual accounts per unit": ["virtual account", "virtual accounts"],
+    "Preventive maintenance": ["preventive maintenance", "pm schedule"],
+    "Role-based access": ["role based", "role-based"],
+    "Defaulter tracking": ["defaulter", "arrears tracking"],
+    "GST/TDS reports": ["gst", "tds"],
+    "Balance sheet & dashboards": ["balance sheet", "dashboard"],
+}
+
+ASP_FEATURES = {
+    "Managed accounting (bills & receipts)": ["managed accounting", "computerized bills", "receipts"],
+    "Bookkeeping (all incomes/expenses)": ["bookkeeping", "income expense"],
+    "Bank reconciliation + suspense": ["suspense", "bank reconciliation", "reco"],
+    "Financial reports (non-audited)": ["financial report", "non audited", "trial balance", "p&l", "profit and loss"],
+    "Finalisation support & audit coordination": ["finalisation", "audit coordination", "auditor"],
+    "Vendor & PO/WO management": ["vendor management", "po", "wo", "work order"],
+    "Inventory & amenities booking": ["inventory", "amenities booking", "amenity booking"],
+    "Dedicated remote accountant": ["remote accountant", "dedicated accountant"],
+    "Annual data backup": ["annual data back", "backup", "data backup"],
+}
+# --- END OF FEATURE CHECKLISTS ---
 
 def _init_gemini():
     """Initializes the Gemini client with the API key from environment variables."""
@@ -62,13 +99,49 @@ def _load_master_prompt(config: Dict[str, Any]) -> str:
     logging.warning("prompt.txt not found. Using a generic fallback prompt.")
     return "Act as an expert business analyst and extract insights from the provided transcript."
 
+# --- NEW HELPER FUNCTIONS FOR FEATURE ANALYSIS ---
+def _normalize_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip().lower()
+
+def _match_coverage(transcript: str, feature_map: Dict[str, List[str]]) -> Set[str]:
+    text = _normalize_text(transcript)
+    covered = set()
+    for feature, keys in feature_map.items():
+        if any(k in text for k in keys):
+            covered.add(feature)
+    return covered
+
+def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
+    """Analyzes a transcript against checklists to find covered and missed features."""
+    if not transcript:
+        return "N/A", "N/A"
+        
+    erp_covered = _match_coverage(transcript, ERP_FEATURES)
+    asp_covered = _match_coverage(transcript, ASP_FEATURES)
+    
+    erp_summary = f"ERP: {len(erp_covered)}/{len(ERP_FEATURES)} covered."
+    asp_summary = f"ASP: {len(asp_covered)}/{len(ASP_FEATURES)} covered."
+    
+    feature_coverage_summary = f"{erp_summary} {asp_summary}"
+    
+    # Identify missed opportunities from a priority list
+    priority_misses = [
+        feature for feature, keys in {**ERP_FEATURES, **ASP_FEATURES}.items()
+        if feature not in erp_covered and feature not in asp_covered and
+        any(k in ["tally", "reconciliation", "upi", "managed accounting", "dedicated accountant"] for k in keys)
+    ]
+    missed_opportunities_text = "- " + "\n- ".join(priority_misses) if priority_misses else "N/A"
+    
+    return feature_coverage_summary, missed_opportunities_text
+# --- END OF NEW HELPER FUNCTIONS ---
+
+
 @retry(reraise=True, stop=stop_after_attempt(3),
        wait=wait_exponential(multiplier=2, min=2, max=20),
        retry=retry_if_exception_type((QuotaExceeded, RuntimeError)))
 def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_name: str) -> Dict[str, Any]:
     """
     Uploads a file, waits for it to become ACTIVE, then generates content in a single call.
-    This is the robust method to avoid race conditions and API errors like 'ragStoreName'.
     """
     try:
         model = genai.GenerativeModel(model_name)
@@ -76,30 +149,28 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
         logging.info(f"Uploading file '{os.path.basename(file_path)}' to Gemini API...")
         uploaded_file = genai.upload_file(path=file_path, mime_type=mime_type)
         
-        # --- FIX FOR "ragStoreName" and "not ACTIVE" ERRORS ---
-        # The file upload is asynchronous. We must wait for the file to be 'ACTIVE'
-        # before we can use it. This loop checks the status.
         logging.info(f"File uploaded. State: {uploaded_file.state.name}. Waiting for it to become ACTIVE...")
         timeout_seconds = 300 # 5 minute timeout
         start_time = time.time()
         while uploaded_file.state.name == "PROCESSING":
             if time.time() - start_time > timeout_seconds:
                 raise RuntimeError(f"File '{uploaded_file.name}' was stuck in PROCESSING state for over {timeout_seconds} seconds.")
-            time.sleep(10) # Wait for 10 seconds before checking again
+            time.sleep(10)
             uploaded_file = genai.get_file(uploaded_file.name)
             logging.info(f"File state: {uploaded_file.state.name}")
 
         if uploaded_file.state.name != "ACTIVE":
             raise RuntimeError(f"File processing failed on Google's servers with final state: {uploaded_file.state.name}")
-        # --- END OF FIX ---
 
         logging.info("File is ACTIVE. Generating content...")
+        # Add a placeholder for the transcript in the prompt if it exists
+        if "{transcript}" in master_prompt:
+             # The one-shot model generates the transcript implicitly. We ask the model to also return it.
+             master_prompt += "\n\nFinally, add a key `transcript_full` with the complete verbatim transcript of the audio."
+        
         resp = model.generate_content(
             [uploaded_file, {"text": master_prompt}],
-            generation_config={
-                "temperature": 0.2,
-                "response_mime_type": "application/json",
-            },
+            generation_config={"temperature": 0.2, "response_mime_type": "application/json"},
         )
 
         if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
@@ -119,7 +190,6 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
         if _is_quota_error(e):
             logging.error("Quota exceeded during ONE-SHOT call.")
             raise QuotaExceeded(str(e))
-        # Re-raise other exceptions to be handled by the main loop (e.g., PERMISSION_DENIED)
         raise
 
 def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]) -> None:
@@ -139,7 +209,6 @@ def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, c
 def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
     Orchestrates the download, analysis, and result logging for a single media file.
-    This function is called by main.py for each new file found.
     """
     _init_gemini()
     file_id = file_meta["id"]
@@ -150,31 +219,32 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
     
     local_path = ""
     try:
-        # Step 1: Download the file from Google Drive
-        # NOTE: The "PERMISSION_DENIED" error in your log indicates the Google Drive API
-        # might not be enabled in your Google Cloud project for the service account being used.
-        # Please ensure the 'Google Drive API' is enabled.
         local_path = gdrive.download_file(drive_service, file_id, file_name)
         
-        # Step 2: Prepare the prompt and model name
         master_prompt = _load_master_prompt(config).format(owner_name=member_name)
         model_name = _get_model(config)
 
-        # Step 3: Call the updated, robust Gemini function
         analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, model_name)
 
-        # Step 4: Enrich the AI output with internal data
+        # --- ENHANCEMENT ---
+        # Now, we use the transcript returned by the AI to perform the feature checklist analysis.
+        transcript = analysis_obj.get("transcript_full", "")
+        if transcript:
+             feature_coverage, missed_opportunities = _feature_coverage_and_missed(transcript)
+             analysis_obj["Feature Checklist Coverage"] = feature_coverage
+             # Append to existing missed opportunities if any were found by the AI
+             existing_missed = analysis_obj.get("Missed Opportunities", "N/A")
+             if "N/A" not in missed_opportunities:
+                 analysis_obj["Missed Opportunities"] = f"{existing_missed}\n{missed_opportunities}".strip()
+        # --- END OF ENHANCEMENT ---
+
         _augment_with_manager_info(analysis_obj, member_name, config)
         
-        # You can add other enrichments here if needed (e.g., duration, date)
-
-        # Step 5: Write the final, complete result to Google Sheets
         sheets.write_analysis_result(gsheets_sheet, analysis_obj, config)
 
         logging.info(f"SUCCESS: Finished processing and saved results for {file_name}")
 
     finally:
-        # Step 6: Clean up the downloaded file from the /tmp directory
         if local_path and os.path.exists(local_path):
             try:
                 os.remove(local_path)
