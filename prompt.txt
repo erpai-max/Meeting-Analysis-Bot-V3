@@ -78,5 +78,5 @@ You are an expert sales meeting analyst for Society Management software. Your jo
   "Customer Needs": "- Pain point 1\n- Pain point 2",
   "Overall Client Sentiment": "Positive / Neutral / Negative / Mixed or N/A",
   "Feature Checklist Coverage": "- Feature 1\n- Feature 2 (ERP/ASP) or N/A",
-  "Manager Email": "Email or N/A"
-}
+  "Manager Email": "Email or N/A",
+"transcript_full": "The full, verbatim transcript of the entire audio file."}
