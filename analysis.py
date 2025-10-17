@@ -32,6 +32,7 @@ def _is_quota_error(e: Exception) -> bool:
     We DO NOT treat long transcripts, token sizes, or generic errors as quota.
     """
     msg = str(e).lower()
+    # Prefer typed exception if available
     try:
         from google.api_core.exceptions import ResourceExhausted
         if isinstance(e, ResourceExhausted):
@@ -39,8 +40,9 @@ def _is_quota_error(e: Exception) -> bool:
     except Exception:
         pass
     keywords = [
-        "resourceexhausted", "resource exhausted", "quota exceeded", "quota", 
-        "too many requests", "rate limit", "rate-limit", "429"
+        "resourceexhausted", "resource exhausted",
+        "quota exceeded", "quota", "too many requests",
+        "rate limit", "rate-limit", "429"
     ]
     return any(k in msg for k in keywords)
 
@@ -279,6 +281,7 @@ If a field is unknown, set it to "" (empty string).
 """).strip()
 
 def _is_one_shot(config: Dict[str, Any]) -> bool:
+    # ENV override first; then default to True unless explicitly disabled
     env = os.getenv("GEMINI_ONE_SHOT")
     if env is not None:
         return env.strip().lower() in ("1", "true", "yes", "on")
@@ -305,8 +308,116 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
             raise QuotaExceeded(str(e))
         raise
 
+@retry(reraise=True, stop=stop_after_attempt(3),
+       wait=wait_exponential(multiplier=2, min=2, max=20),
+       retry=retry_if_exception_type((QuotaExceeded, RuntimeError)))
+def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dict[str, Any]:
+    try:
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(
+            [
+                {"text": master_prompt},
+                {"text": "\n\n---\nMEETING TRANSCRIPT:\n"},
+                {"text": transcript},
+            ],
+            generation_config={
+                "temperature": 0.2,
+                "response_mime_type": "application/json",
+            },
+        )
+        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
+            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+        raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise RuntimeError("Analysis output is not a JSON object.")
+        return data
+    except json.JSONDecodeError as je:
+        raise RuntimeError(f"Failed to parse JSON from model: {je}") from je
+    except Exception as e:
+        if _is_quota_error(e):
+            logging.error("Quota exceeded during ANALYZE call.")
+            raise QuotaExceeded(str(e))
+        raise
+
+@retry(reraise=True, stop=stop_after_attempt(3),
+       wait=wait_exponential(multiplier=2, min=2, max=20),
+       retry=retry_if_exception_type((QuotaExceeded, RuntimeError)))
+def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_name: str) -> Dict[str, Any]:
+    """
+    Single-call path: upload audio + ask for final JSON directly.
+    If your prompt includes `transcript_full`, we'll use it for deterministic coverage.
+    """
+    try:
+        model = genai.GenerativeModel(model_name)
+        uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
+        resp = model.generate_content(
+            [uploaded, {"text": master_prompt}],
+            generation_config={
+                "temperature": 0.2,
+                "response_mime_type": "application/json",
+            },
+        )
+        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
+            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+        raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise RuntimeError("One-shot output is not a JSON object.")
+        return data
+    except json.JSONDecodeError as je:
+        raise RuntimeError(f"Failed to parse JSON from one-shot model: {je}") from je
+    except Exception as e:
+        if _is_quota_error(e):
+            logging.error("Quota exceeded during ONE-SHOT call.")
+            raise QuotaExceeded(str(e))
+        raise
+
+# ---------- Manager info enrichment ----------
+def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]) -> None:
+    """
+    Fill Owner/Email/Manager/Team/Manager Email using config.manager_map / manager_emails.
+    We OVERRIDE to ensure correctness based on folder ownership.
+    """
+    analysis_obj["Owner (Who handled the meeting)"] = member_name or ""
+    try:
+        m = (config.get("manager_map") or {}).get(member_name, {})
+        analysis_obj["Email Id"] = m.get("Email", "") or analysis_obj.get("Email Id", "")
+        analysis_obj["Manager"] = m.get("Manager", "") or analysis_obj.get("Manager", "")
+        analysis_obj["Team"] = m.get("Team", "") or analysis_obj.get("Team", "")
+        mgr_email = (config.get("manager_emails") or {}).get(m.get("Manager", ""), "")
+        analysis_obj["Manager Email"] = mgr_email or analysis_obj.get("Manager Email", "")
+    except Exception:
+        # still ensure owner is set even if mapping lookup fails
+        pass
+
+# ---------- Sheets I/O ----------
+def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, duration_min: str,
+                   feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any],
+                   member_name: str, config: Dict[str, Any]):
+    import sheets  # local module
+
+    analysis_obj["Date"] = date_out
+    analysis_obj["Meeting duration (min)"] = duration_min
+    if feature_coverage:
+        analysis_obj["Feature Checklist Coverage"] = feature_coverage
+    if missed_opps:
+        analysis_obj["Missed Opportunities"] = missed_opps
+
+    # Ensure enrichment is applied (idempotent override)
+    _augment_with_manager_info(analysis_obj, member_name, config)
+
+    status_note = f"Processed via Gemini; duration={duration_min}m"
+    sheets.update_ledger(gsheets_sheet, file_id, "Processed", status_note, config, file_name)
+
+    # Write the actual row to "Analysis Results"
+    if hasattr(sheets, "write_analysis_result"):
+        sheets.write_analysis_result(gsheets_sheet, analysis_obj, config)
+    else:
+        logging.warning("sheets.write_analysis_result not found; results row not appended.")
+
 # =========================
-# Main entry function handling file processing
+# Entry point
 # =========================
 def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
