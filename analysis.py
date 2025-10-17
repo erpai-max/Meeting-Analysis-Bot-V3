@@ -105,11 +105,7 @@ def _normalize_text(s: str) -> str:
 
 def _match_coverage(transcript: str, feature_map: Dict[str, List[str]]) -> Set[str]:
     text = _normalize_text(transcript)
-    covered = set()
-    for feature, keys in feature_map.items():
-        if any(k in text for k in keys):
-            covered.add(feature)
-    return covered
+    return {feature for feature, keys in feature_map.items() if any(k in text for k in keys)}
 
 def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
     """Analyzes a transcript against checklists to find covered and missed features."""
@@ -163,10 +159,6 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
             raise RuntimeError(f"File processing failed on Google's servers with final state: {uploaded_file.state.name}")
 
         logging.info("File is ACTIVE. Generating content...")
-        # Add a placeholder for the transcript in the prompt if it exists
-        if "{transcript}" in master_prompt:
-             # The one-shot model generates the transcript implicitly. We ask the model to also return it.
-             master_prompt += "\n\nFinally, add a key `transcript_full` with the complete verbatim transcript of the audio."
         
         resp = model.generate_content(
             [uploaded_file, {"text": master_prompt}],
@@ -192,7 +184,7 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
             raise QuotaExceeded(str(e))
         raise
 
-def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]) -> None:
+def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """Fills in Owner, Manager, Team, and Email details from the config.yaml manager_map."""
     analysis_obj["Owner (Who handled the meeting)"] = member_name
     manager_map = config.get("manager_map", {})
@@ -209,6 +201,7 @@ def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, c
 def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
     Orchestrates the download, analysis, and result logging for a single media file.
+    This function is called by main.py for each new file found.
     """
     _init_gemini()
     file_id = file_meta["id"]
@@ -226,17 +219,22 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
 
         analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, model_name)
 
-        # --- ENHANCEMENT ---
-        # Now, we use the transcript returned by the AI to perform the feature checklist analysis.
+        # --- THIS IS THE FIX for the 'transcript' KeyError ---
+        # 1. Safely get the transcript from the new 'transcript_full' key in the AI's JSON response.
         transcript = analysis_obj.get("transcript_full", "")
         if transcript:
+             logging.info("Transcript found. Performing automated feature analysis...")
+             # 2. Use that transcript to automatically and accurately calculate the coverage.
              feature_coverage, missed_opportunities = _feature_coverage_and_missed(transcript)
+             
+             # 3. Update the analysis object with the new, more accurate data.
              analysis_obj["Feature Checklist Coverage"] = feature_coverage
-             # Append to existing missed opportunities if any were found by the AI
              existing_missed = analysis_obj.get("Missed Opportunities", "N/A")
              if "N/A" not in missed_opportunities:
                  analysis_obj["Missed Opportunities"] = f"{existing_missed}\n{missed_opportunities}".strip()
-        # --- END OF ENHANCEMENT ---
+        else:
+            logging.warning("AI response did not include 'transcript_full' key. Cannot perform feature analysis.")
+        # --- END OF FIX ---
 
         _augment_with_manager_info(analysis_obj, member_name, config)
         
@@ -245,10 +243,10 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
         logging.info(f"SUCCESS: Finished processing and saved results for {file_name}")
 
     finally:
+        # Clean up the downloaded file from the /tmp directory
         if local_path and os.path.exists(local_path):
             try:
                 os.remove(local_path)
                 logging.info(f"Cleaned up temporary file: {local_path}")
             except OSError as e:
                 logging.error(f"Error cleaning up temporary file {local_path}: {e}")
-
