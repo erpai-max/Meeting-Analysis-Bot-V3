@@ -500,4 +500,3 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
     )
 
     logging.info(f"SUCCESS: Processed {file_name} (date={date_out}, duration={duration_min}m)")
-
