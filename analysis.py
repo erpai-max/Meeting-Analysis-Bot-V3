@@ -39,9 +39,8 @@ def _is_quota_error(e: Exception) -> bool:
     except Exception:
         pass
     keywords = [
-        "resourceexhausted", "resource exhausted",
-        "quota exceeded", "quota", "too many requests",
-        "rate limit", "rate-limit", "429"
+        "resourceexhausted", "resource exhausted", "quota exceeded", "quota", 
+        "too many requests", "rate limit", "rate-limit", "429"
     ]
     return any(k in msg for k in keywords)
 
@@ -49,7 +48,7 @@ def _is_quota_error(e: Exception) -> bool:
 # Constants & Feature Maps
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
-DEFAULT_MODEL_NAME = "gemini-2.5-flash-preview-05-20"  # Updated default model
+DEFAULT_MODEL_NAME = "gemini-2.5-flash-preview-05-20" # Updated default model
 
 ERP_FEATURES = {
     "Tally import/export": ["tally", "tally import", "tally export"],
@@ -118,6 +117,148 @@ def _download_drive_file(drive_service, file_id: str, out_path: str) -> Tuple[st
             status, done = downloader.next_chunk()
     return mime_type, out_path
 
+# ---------- Date extraction ----------
+_DATE_PATTERNS = [
+    (re.compile(r"\b(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{4})\b"), "%d-%m-%Y"), # dd-mm-yyyy
+    (re.compile(r"\b(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})\b"), "%Y-%m-%d"), # yyyy-mm-dd
+    (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), "%Y%m%d"),                 # yyyymmdd
+]
+
+def _format_ddmmyy(d: dt.date) -> str:
+    return d.strftime("%d/%m/%y")
+
+def _extract_date_from_name(name: str) -> Optional[str]:
+    base = os.path.splitext(name)[0]
+    base = base.replace("|", " ").replace("_", " ").replace(".", " ")
+    for rx, fmt in _DATE_PATTERNS:
+        m = rx.search(base)
+        if m:
+            g = m.groups()
+            try:
+                if fmt == "%d-%m-%Y":
+                    dd, mm, yyyy = int(g[0]), int(g[1]), int(g[2])
+                    parsed = dt.date(yyyy, mm, dd)
+                elif fmt == "%Y-%m-%d":
+                    yyyy, mm, dd = int(g[0]), int(g[1]), int(g[2])
+                    parsed = dt.date(yyyy, mm, dd)
+                elif fmt == "%Y%m%d":
+                    yyyy, mm, dd = int(g[0]), int(g[1]), int(g[2])
+                    parsed = dt.date(yyyy, mm, dd)
+                else:
+                    continue
+                return _format_ddmmyy(parsed)
+            except Exception:
+                continue
+    return None
+
+def _pick_date_for_output(file_name: str, created_time_iso: Optional[str]) -> str:
+    """
+    1) date in filename → 2) Drive createdTime → 3) "NA"; format dd/mm/yy
+    """
+    from_name = _extract_date_from_name(file_name)
+    if from_name:
+        return from_name
+    if created_time_iso:
+        try:
+            d = dt.datetime.fromisoformat(created_time_iso.replace("Z", "+00:00")).date()
+            return _format_ddmmyy(d)
+        except Exception:
+            pass
+    return "NA"
+
+# ---------- Duration extraction ----------
+def _millis_to_minutes(ms: int) -> str:
+    return f"{int(round(ms / 60000.0))}"
+
+def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: str) -> str:
+    """
+    Prefers Drive videoMediaMetadata.durationMillis (videos).
+    For audio, use mutagen (mp3/m4a/ogg/wav/etc.). Falls back to WAV wave reader if needed.
+    Returns integer minutes as a string.
+    """
+    # 1) Video metadata from Drive
+    vmeta = meta.get("videoMediaMetadata") or {}
+    dur_ms = vmeta.get("durationMillis")
+    if isinstance(dur_ms, (int, float)) and dur_ms > 0:
+        return _millis_to_minutes(int(dur_ms))
+
+    # 2) Audio duration via mutagen
+    try:
+        from mutagen import File as MutagenFile
+        mf = MutagenFile(local_path)
+        if mf is not None and getattr(mf, "info", None) and getattr(mf.info, "length", None):
+            seconds = float(mf.info.length)
+            return f"{int(round(seconds / 60.0))}"
+    except Exception:
+        pass
+
+    # 3) WAV fallback without mutagen (if applicable)
+    if local_path.lower().endswith(".wav"):
+        try:
+            import wave
+            with wave.open(local_path, "rb") as w:
+                frames = w.getnframes()
+                rate = w.getframerate()
+                seconds = frames / float(rate)
+                return f"{int(round(seconds / 60.0))}"
+        except Exception:
+            pass
+
+    return "NA"
+
+# ---------- Society name from file name ----------
+def _society_from_filename(name: str) -> str:
+    """Derive Society Name from file name (drop extension, tidy separators)."""
+    base = os.path.splitext(name or "")[0]
+    base = base.replace("_", " ").replace("-", " ").replace(".", " ").strip()
+    base = " ".join(base.split())
+    return base or "Unknown"
+
+# ---------- ERP/ASP coverage & missed-opps ----------
+def _normalize_text(s: str) -> str:
+    import re as _re
+    return _re.sub(r"\s+", " ", s or "").strip().lower()
+
+def _match_coverage(transcript: str, feature_map: Dict[str, List[str]]) -> Tuple[Set[str], Set[str]]:
+    text = _normalize_text(transcript)
+    covered, missed = set(), set()
+    for feature, keys in feature_map.items():
+        hit = any(k in text for k in keys)
+        if hit:
+            covered.add(feature)
+        else:
+            missed.add(feature)
+    return covered, missed
+
+def _build_feature_summary(covered_all: Set[str], total: int, label: str) -> str:
+    pct = 0 if total == 0 else int(round(100 * len(covered_all) / total))
+    covered_list = sorted(covered_all)
+    head = f"{label} Coverage: {len(covered_all)}/{total} ({pct}%)."
+    if covered_list:
+        head += " Covered: " + ", ".join(covered_list) + "."
+    return head
+
+def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
+    erp_cov, erp_missed = _match_coverage(transcript, ERP_FEATURES)
+    asp_cov, asp_missed = _match_coverage(transcript, ASP_FEATURES)
+    feature_coverage_summary = " ".join([
+        _build_feature_summary(erp_cov, len(ERP_FEATURES), "ERP"),
+        _build_feature_summary(asp_cov, len(ASP_FEATURES), "ASP")
+    ])
+    priority = [
+        "Tally import/export", "Bank reconciliation", "UPI/cards gateway",
+        "Defaulter tracking", "PO / WO approvals", "Inventory",
+        "Managed accounting (bills & receipts)", "Bank reconciliation + suspense",
+        "Financial reports (non-audited)", "Dedicated remote accountant"
+    ]
+    missed_all = list(sorted(erp_missed.union(asp_missed)))
+    missed_sorted = sorted(
+        missed_all,
+        key=lambda x: (0 if x in priority else 1, priority.index(x) if x in priority else 999, x)
+    )
+    missed_text = ", ".join(missed_sorted) if missed_sorted else ""
+    return feature_coverage_summary, missed_text
+
 # ---------- Gemini config & calls ----------
 def _get_model(config: Dict[str, Any]) -> str:
     return config.get("google_llm", {}).get("model", "gemini-1.5-flash")
@@ -143,48 +284,8 @@ def _is_one_shot(config: Dict[str, Any]) -> bool:
         return env.strip().lower() in ("1", "true", "yes", "on")
     return bool(config.get("google_llm", {}).get("one_shot", True))
 
-@retry(reraise=True, stop=stop_after_attempt(3),
-       wait=wait_exponential(multiplier=2, min=2, max=20),
-       retry=retry_if_exception_type((QuotaExceeded, RuntimeError)))
-def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_name: str, rag_store_name: str) -> Dict[str, Any]:
-    """
-    Single-call path: upload audio + ask for final JSON directly.
-    If your prompt includes `transcript_full`, we'll use it for deterministic coverage.
-    """
-    try:
-        model = genai.GenerativeModel(model_name)
-        uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
-        
-        # Ensure the ragStoreName is passed in the API request
-        resp = model.generate_content(
-            [uploaded, {"text": master_prompt}, {"ragStoreName": rag_store_name}],
-            generation_config={
-                "temperature": 0.2,
-                "response_mime_type": "application/json",
-            },
-        )
+# Final main code handling file processing (continued from previous parts)
 
-        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
-            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
-        
-        raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
-        data = json.loads(raw)
-        
-        if not isinstance(data, dict):
-            raise RuntimeError("One-shot output is not a JSON object.")
-        
-        return data
-    except json.JSONDecodeError as je:
-        raise RuntimeError(f"Failed to parse JSON from one-shot model: {je}") from je
-    except Exception as e:
-        if _is_quota_error(e):
-            logging.error("Quota exceeded during ONE-SHOT call.")
-            raise QuotaExceeded(str(e))
-        raise
-
-# =========================
-# Entry point
-# =========================
 def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
     Orchestrates: metadata -> download -> (one-shot OR transcribe+analyze) -> enrich -> write.
@@ -216,17 +317,10 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
     # Prompt
     master_prompt = _load_master_prompt(config)
 
-    # **Set the ragStoreName** (Ensure it's provided)
-    rag_store_name = os.getenv("RAG_STORE_NAME", "DefaultStoreName")  # Fetch it from an env variable
-
-    if not rag_store_name:
-        logging.error("ragStoreName is missing. Ensure it's defined in your environment variables or config.")
-        return
-
     # One-shot vs Two-call
     transcript = ""
     if _is_one_shot(config):
-        analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, _get_analysis_model(config), rag_store_name)
+        analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, _get_analysis_model(config))
         transcript = analysis_obj.get("transcript_full", "")
     else:
         try:
