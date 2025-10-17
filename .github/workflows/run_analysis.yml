@@ -26,12 +26,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: Install dependencies and Verify
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          echo "--- VERIFYING LIBRARY VERSION ---"
+          pip show google-generativeai
 
       - name: Execute analysis script
         env:
