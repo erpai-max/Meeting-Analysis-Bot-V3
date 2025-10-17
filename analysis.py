@@ -210,6 +210,7 @@ def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: st
 def _society_from_filename(name: str) -> str:
     """Derive Society Name from file name (drop extension, tidy separators)."""
     base = os.path.splitext(name or "")[0]
+    # Replace common separators with spaces and collapse whitespace
     base = base.replace("_", " ").replace("-", " ").replace(".", " ").strip()
     base = " ".join(base.split())
     return base or "Unknown"
@@ -278,14 +279,35 @@ If a field is unknown, set it to "" (empty string).
 """).strip()
 
 def _is_one_shot(config: Dict[str, Any]) -> bool:
-    # ENV override first; then default to True unless explicitly disabled
     env = os.getenv("GEMINI_ONE_SHOT")
     if env is not None:
         return env.strip().lower() in ("1", "true", "yes", "on")
     return bool(config.get("google_llm", {}).get("one_shot", True))
 
-# Final main code handling file processing (continued from previous parts)
+@retry(reraise=True, stop=stop_after_attempt(3),
+       wait=wait_exponential(multiplier=2, min=2, max=20),
+       retry=retry_if_exception_type((QuotaExceeded, RuntimeError)))
+def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
+    try:
+        model = genai.GenerativeModel(model_name)
+        uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
+        prompt = "Transcribe the audio verbatim with punctuation. Do not summarize. Output plain text only."
+        resp = model.generate_content([uploaded, {"text": prompt}])
+        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
+            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+        text = (resp.text or "").strip()
+        if not text:
+            raise RuntimeError("Empty transcript from Gemini.")
+        return text
+    except Exception as e:
+        if _is_quota_error(e):
+            logging.error("Quota exceeded during TRANSCRIBE call.")
+            raise QuotaExceeded(str(e))
+        raise
 
+# =========================
+# Main entry function handling file processing
+# =========================
 def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """
     Orchestrates: metadata -> download -> (one-shot OR transcribe+analyze) -> enrich -> write.
