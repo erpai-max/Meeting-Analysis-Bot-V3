@@ -1,6 +1,1 @@
-- name: Install dependencies and Verify
-  run: |
-    # ... other commands
-    pip install -r requirements.txt
-    echo "--- VERIFYING LIBRARY VERSION ---"
-    pip show google-generativeai
+
