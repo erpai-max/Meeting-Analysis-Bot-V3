@@ -50,7 +50,8 @@ def _is_quota_error(e: Exception) -> bool:
 # Constants & Feature Maps
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
-DEFAULT_MODEL_NAME = "gemini-2.5-flash-preview-05-20" # Updated default model
+# This DEFAULT_MODEL_NAME is usually a fallback, the config.yaml setting takes precedence.
+DEFAULT_MODEL_NAME = "gemini-1.5-flash-preview-05-20"
 
 ERP_FEATURES = {
     "Tally import/export": ["tally", "tally import", "tally export"],
@@ -263,9 +264,11 @@ def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
     return feature_coverage_summary, missed_text
 
 # ---------- Gemini config & calls ----------
+# Gets the primary model from config, falling back to DEFAULT_MODEL_NAME if needed
 def _get_model(config: Dict[str, Any]) -> str:
-    return config.get("google_llm", {}).get("model", "gemini-1.5-flash")
+    return config.get("google_llm", {}).get("model", DEFAULT_MODEL_NAME) # Changed fallback
 
+# Gets the analysis model, falling back to the primary model
 def _get_analysis_model(config: Dict[str, Any]) -> str:
     return config.get("google_llm", {}).get("analysis_model", _get_model(config))
 
@@ -274,6 +277,7 @@ def _load_master_prompt(config: Dict[str, Any]) -> str:
     if os.path.exists(prompt_path):
         with open(prompt_path, "r", encoding="utf-8") as f:
             return f.read().strip()
+    # Fallback prompt if prompt.txt is missing
     return config.get("google_llm", {}).get("schema_prompt", """
 Act as an expert business analyst for society-management ERP & ASP meetings.
 Strictly return a single JSON object (no prose outside JSON).
@@ -295,17 +299,27 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
         model = genai.GenerativeModel(model_name)
         uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
         prompt = "Transcribe the audio verbatim with punctuation. Do not summarize. Output plain text only."
-        resp = model.generate_content([uploaded, {"text": prompt}])
+        # Use safety_settings to potentially allow more content types if needed
+        resp = model.generate_content([uploaded, {"text": prompt}], safety_settings={'HARASSMENT': 'block_none'})
         if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
-            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+             # Log the specific block reason
+             logging.error(f"Transcription prompt blocked: {resp.prompt_feedback.block_reason}")
+             # Depending on the reason, you might want to retry differently or just raise
+             raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
         text = (resp.text or "").strip()
         if not text:
-            raise RuntimeError("Empty transcript from Gemini.")
+             # It might be empty due to safety settings even if not explicitly blocked
+             logging.warning("Received empty transcript from Gemini. Check safety settings or content.")
+             # Decide if this should be a hard error or return empty string
+             # For now, let's treat it as potentially valid (e.g., silent audio)
+             # raise RuntimeError("Empty transcript from Gemini.")
         return text
     except Exception as e:
         if _is_quota_error(e):
             logging.error("Quota exceeded during TRANSCRIBE call.")
             raise QuotaExceeded(str(e))
+        # Log other specific API errors if helpful
+        logging.error(f"Error during transcription: {e}", exc_info=True)
         raise
 
 @retry(reraise=True, stop=stop_after_attempt(3),
@@ -324,20 +338,43 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
                 "temperature": 0.2,
                 "response_mime_type": "application/json",
             },
+             # Consider adding safety settings here too if content might be sensitive
+             safety_settings={'HARASSMENT': 'block_none'}
         )
         if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
-            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
-        raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
-        data = json.loads(raw)
+             logging.error(f"Analysis prompt blocked: {resp.prompt_feedback.block_reason}")
+             raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
+
+        # Improved JSON parsing robustness
+        raw = (resp.text or "").strip()
+        # Handle potential markdown code fences
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+        if not raw:
+             logging.error("Received empty response during analysis.")
+             raise RuntimeError("Empty analysis response from Gemini.")
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as je:
+            logging.error(f"Failed to parse JSON from model. Raw response: '{raw[:500]}...'")
+            raise RuntimeError(f"Failed to parse JSON from model: {je}") from je
+
         if not isinstance(data, dict):
-            raise RuntimeError("Analysis output is not a JSON object.")
+             logging.error(f"Analysis output is not a JSON object. Type: {type(data)}. Raw: '{raw[:500]}...'")
+             raise RuntimeError("Analysis output is not a JSON object.")
         return data
-    except json.JSONDecodeError as je:
-        raise RuntimeError(f"Failed to parse JSON from model: {je}") from je
+
     except Exception as e:
         if _is_quota_error(e):
             logging.error("Quota exceeded during ANALYZE call.")
             raise QuotaExceeded(str(e))
+        # Log other API errors
+        logging.error(f"Error during analysis: {e}", exc_info=True)
         raise
 
 @retry(reraise=True, stop=stop_after_attempt(3),
@@ -350,27 +387,92 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
     """
     try:
         model = genai.GenerativeModel(model_name)
+
+        logging.info(f"Uploading file for one-shot: {file_path} ({mime_type})")
+        # Check file existence and size before upload
+        if not os.path.exists(file_path):
+             raise FileNotFoundError(f"File not found for upload: {file_path}")
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+             logging.warning(f"File is empty, skipping upload: {file_path}")
+             # Decide how to handle empty files - raise error or return default JSON?
+             # Returning a default might be safer to avoid breaking the whole run.
+             return {"error": "Input file was empty"} # Example default/error structure
+
         uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
+        logging.info(f"File uploaded successfully: {uploaded.name}")
+
         resp = model.generate_content(
             [uploaded, {"text": master_prompt}],
             generation_config={
                 "temperature": 0.2,
                 "response_mime_type": "application/json",
             },
+             safety_settings={'HARASSMENT': 'block_none'} # Add safety settings
         )
-        if getattr(resp, "prompt_feedback", None) and getattr(resp.prompt_feedback, "block_reason", None):
-            raise RuntimeError(f"Prompt blocked: {resp.prompt_feedback.block_reason}")
-        raw = (resp.text or "").strip().strip("` ").removeprefix("json").lstrip(":").strip()
-        data = json.loads(raw)
+
+        # More detailed feedback check
+        if resp.prompt_feedback.block_reason:
+             logging.error(f"One-shot prompt blocked: {resp.prompt_feedback.block_reason}")
+             logging.error(f"Safety ratings: {resp.prompt_feedback.safety_ratings}")
+             raise RuntimeError(f"Prompt blocked due to {resp.prompt_feedback.block_reason}")
+        if not resp.candidates:
+             logging.error("No candidates returned from one-shot call. Check safety settings or prompt.")
+             logging.error(f"Finish reason: {resp.candidates[0].finish_reason if resp.candidates else 'N/A'}")
+             logging.error(f"Safety ratings: {resp.candidates[0].safety_ratings if resp.candidates else 'N/A'}")
+             raise RuntimeError("No response candidates received from Gemini.")
+        if resp.candidates[0].finish_reason != 'STOP':
+             logging.warning(f"One-shot generation finished with reason: {resp.candidates[0].finish_reason}")
+             # Potentially raise error depending on finish reason (e.g., MAX_TOKENS)
+
+        # Robust JSON parsing
+        raw = resp.text.strip()
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+        if not raw:
+             logging.error("Received empty response during one-shot analysis.")
+             raise RuntimeError("Empty one-shot response from Gemini.")
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as je:
+            logging.error(f"Failed to parse JSON from one-shot model. Raw: '{raw[:500]}...'")
+            raise RuntimeError(f"Failed to parse JSON from one-shot model: {je}") from je
+
         if not isinstance(data, dict):
-            raise RuntimeError("One-shot output is not a JSON object.")
+             logging.error(f"One-shot output is not a JSON object. Type: {type(data)}. Raw: '{raw[:500]}...'")
+             raise RuntimeError("One-shot output is not a JSON object.")
+
+        # ---- Attempt to add full transcript if missing and one-shot was used ----
+        # This requires a separate transcription call ONLY if 'transcript_full' is missing
+        # AND you are in one-shot mode. This adds cost but ensures coverage calculation.
+        # Consider if this is worth the extra API call.
+        if "transcript_full" not in data or not data["transcript_full"]:
+            logging.warning("Transcript missing from one-shot JSON, attempting separate transcription...")
+            try:
+                # Use the primary model for transcription if different
+                transcription_model = _get_model(config)
+                # Need to re-upload or use existing upload if handle is kept
+                # Simpler: re-upload for now
+                transcript_text = _gemini_transcribe(file_path, mime_type, transcription_model)
+                data["transcript_full"] = transcript_text
+                logging.info("Successfully added transcript via separate call.")
+            except Exception as te:
+                logging.error(f"Failed to get transcript separately after one-shot: {te}")
+                data["transcript_full"] = "Transcription failed" # Indicate failure
+
         return data
-    except json.JSONDecodeError as je:
-        raise RuntimeError(f"Failed to parse JSON from one-shot model: {je}") from je
+
     except Exception as e:
         if _is_quota_error(e):
             logging.error("Quota exceeded during ONE-SHOT call.")
             raise QuotaExceeded(str(e))
+        # Log other API errors
+        logging.error(f"Error during one-shot processing: {e}", exc_info=True)
         raise
 
 # ---------- Manager info enrichment ----------
@@ -379,42 +481,116 @@ def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, c
     Fill Owner/Email/Manager/Team/Manager Email using config.manager_map / manager_emails.
     We OVERRIDE to ensure correctness based on folder ownership.
     """
-    analysis_obj["Owner (Who handled the meeting)"] = member_name or ""
+    analysis_obj["Owner (Who handled the meeting)"] = member_name or "Unknown" # Ensure owner always set
     try:
-        m = (config.get("manager_map") or {}).get(member_name, {})
-        analysis_obj["Email Id"] = m.get("Email", "") or analysis_obj.get("Email Id", "")
-        analysis_obj["Manager"] = m.get("Manager", "") or analysis_obj.get("Manager", "")
-        analysis_obj["Team"] = m.get("Team", "") or analysis_obj.get("Team", "")
-        mgr_email = (config.get("manager_emails") or {}).get(m.get("Manager", ""), "")
-        analysis_obj["Manager Email"] = mgr_email or analysis_obj.get("Manager Email", "")
-    except Exception:
-        # still ensure owner is set even if mapping lookup fails
-        pass
+        # Normalize member_name for lookup if necessary (e.g., case-insensitive)
+        normalized_member_name = member_name.strip() # Add .lower() if map keys are lowercase
+        m = (config.get("manager_map") or {}).get(normalized_member_name, {})
+        if m: # Only update if a mapping was found
+             analysis_obj["Email Id"] = m.get("Email", analysis_obj.get("Email Id", "")) # Keep existing if map is empty
+             analysis_obj["Manager"] = m.get("Manager", analysis_obj.get("Manager", ""))
+             analysis_obj["Team"] = m.get("Team", analysis_obj.get("Team", ""))
+             manager_name = m.get("Manager")
+             if manager_name:
+                 # Normalize manager name for email lookup too
+                 mgr_email = (config.get("manager_emails") or {}).get(manager_name.strip(), "") # Add .lower() if keys are lowercase
+                 analysis_obj["Manager Email"] = mgr_email or analysis_obj.get("Manager Email", "")
+             else:
+                  analysis_obj["Manager Email"] = analysis_obj.get("Manager Email", "") # Keep existing if no manager in map
+        else:
+             logging.warning(f"No manager map entry found for owner: '{member_name}'")
+             # Ensure defaults if no map entry
+             analysis_obj.setdefault("Email Id", "")
+             analysis_obj.setdefault("Manager", "")
+             analysis_obj.setdefault("Team", "")
+             analysis_obj.setdefault("Manager Email", "")
+
+    except Exception as e:
+        logging.error(f"Error during manager info augmentation for '{member_name}': {e}", exc_info=True)
+        # Ensure owner is still set even if mapping lookup fails
+        analysis_obj["Owner (Who handled the meeting)"] = member_name or "Unknown"
+
 
 # ---------- Sheets I/O ----------
 def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, duration_min: str,
                    feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any],
                    member_name: str, config: Dict[str, Any]):
-    import sheets  # local module
+    # Import sheets locally to avoid circular dependency if sheets uses analysis
+    try:
+        import sheets
+    except ImportError:
+        logging.error("Failed to import 'sheets' module. Cannot write results.")
+        return # Cannot proceed without sheets module
 
-    analysis_obj["Date"] = date_out
-    analysis_obj["Meeting duration (min)"] = duration_min
+    # --- Pre-write Validation and Cleaning ---
+    # Ensure analysis_obj is a dict
+    if not isinstance(analysis_obj, dict):
+        logging.error(f"Analysis result is not a dictionary for file {file_name}. Type: {type(analysis_obj)}. Skipping write.")
+        # Update ledger with error?
+        sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Invalid analysis result type: {type(analysis_obj)}", config, file_name)
+        return
+
+    # Handle potential None values returned from model, replace with "NA" or "" based on prompt rules
+    for key, value in analysis_obj.items():
+        if value is None:
+            # Check prompt rules if None should be "NA" or ""
+            # Assuming prompt rule implies "NA" for missing facts
+            # If a field *exists* but is None, maybe "" is better? Adjust as needed.
+            analysis_obj[key] = "NA" # Or "" depending on desired output
+
+    # --- Populate Standard Fields ---
+    analysis_obj["Date"] = date_out if date_out != "NA" else analysis_obj.get("Date", "NA") # Use extracted if valid
+    analysis_obj["Meeting duration (min)"] = duration_min if duration_min != "NA" else analysis_obj.get("Meeting duration (min)", "NA")
+    analysis_obj["Society Name"] = _society_from_filename(file_name) # Always derive from filename
+
+    # Add coverage/missed only if calculated and not empty
     if feature_coverage:
         analysis_obj["Feature Checklist Coverage"] = feature_coverage
+    else:
+        # Ensure key exists even if empty, using model's value or default ""
+        analysis_obj.setdefault("Feature Checklist Coverage", "")
+
     if missed_opps:
         analysis_obj["Missed Opportunities"] = missed_opps
+    else:
+        # Ensure key exists
+        analysis_obj.setdefault("Missed Opportunities", "")
+
 
     # Ensure enrichment is applied (idempotent override)
-    _augment_with_manager_info(analysis_obj, member_name, config)
+    try:
+        _augment_with_manager_info(analysis_obj, member_name, config)
+    except Exception as e:
+         logging.error(f"Failed during manager augmentation for {file_name}: {e}")
+         # Continue without augmentation if it fails, owner name should still be set
 
+
+    # --- Write to Sheets ---
     status_note = f"Processed via Gemini; duration={duration_min}m"
-    sheets.update_ledger(gsheets_sheet, file_id, "Processed", status_note, config, file_name)
+    try:
+        sheets.update_ledger(gsheets_sheet, file_id, "Processed", status_note, config, file_name)
+    except Exception as e:
+         logging.error(f"Failed to update ledger for {file_name} (Processed): {e}")
+         # Continue to write results even if ledger fails
 
     # Write the actual row to "Analysis Results"
-    if hasattr(sheets, "write_analysis_result"):
-        sheets.write_analysis_result(gsheets_sheet, analysis_obj, config)
-    else:
-        logging.warning("sheets.write_analysis_result not found; results row not appended.")
+    try:
+        if hasattr(sheets, "write_analysis_result"):
+            sheets.write_analysis_result(gsheets_sheet, analysis_obj, config)
+            logging.info(f"Successfully wrote analysis results to sheet for {file_name}")
+        elif hasattr(sheets, "append_result"): # Check for alternative name
+             sheets.append_result(gsheets_sheet, analysis_obj, config)
+             logging.info(f"Successfully wrote analysis results (via append_result) to sheet for {file_name}")
+        else:
+            logging.warning("sheets.write_analysis_result (or append_result) not found; results row not appended.")
+    except Exception as e:
+         logging.error(f"Failed to write analysis results to sheet for {file_name}: {e}")
+         # Consider updating ledger back to Error status here?
+         try:
+              sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Failed to write results to sheet: {e}", config, file_name)
+         except Exception as le:
+              logging.error(f"Also failed to update ledger to Error status for {file_name}: {le}")
+
 
 # =========================
 # Entry point
@@ -424,79 +600,173 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
     Orchestrates: metadata -> download -> (one-shot OR transcribe+analyze) -> enrich -> write.
     Exceptions are allowed to bubble so main.py can quarantine & stop on quota.
     """
-    _init_gemini()
-
+    local_path = None # Define local_path here to ensure it's available in finally block
     file_id = file_meta["id"]
-    meta = _drive_get_metadata(drive_service, file_id)
-    file_name = meta.get("name", file_meta.get("name", "Unknown Filename"))
-    mime_type = meta.get("mimeType", file_meta.get("mimeType", ""))
-    created_iso = meta.get("createdTime")
+    # Get initial name from metadata if possible, fallback later
+    file_name = file_meta.get("name", f"Unknown_{file_id}")
 
-    logging.info(f"[Gemini-only] Processing: {file_name} ({mime_type})")
-    logging.info(f"One-shot mode: { _is_one_shot(config) }")
-
-    # Date (dd/mm/yy)
-    date_out = _pick_date_for_output(file_name, created_iso)
-
-    # Download
-    tmp_dir = config.get("runtime", {}).get("tmp_dir", "/tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
-    local_path = os.path.join(tmp_dir, f"{file_id}_{file_name}".replace("/", "_"))
-    _, _ = _download_drive_file(drive_service, file_id, local_path)
-
-    # Duration (minutes)
-    duration_min = _probe_duration_minutes(meta, local_path, mime_type)
-
-    # Prompt
-    master_prompt = _load_master_prompt(config)
-
-    # One-shot vs Two-call
-    transcript = ""
-    if _is_one_shot(config):
-        analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, _get_analysis_model(config))
-        transcript = analysis_obj.get("transcript_full", "")
-    else:
-        try:
-            transcript = _gemini_transcribe(local_path, mime_type, _get_model(config))
-            logging.info(f"Transcript length: {len(transcript)} chars")
-        except QuotaExceeded:
-            # Real quota → bubble up to main to stop run
-            raise
-        analysis_obj = _gemini_analyze(transcript, master_prompt, _get_analysis_model(config))
-
-    # ---- Force key outputs based on your rule ----
-    analysis_obj["Society Name"] = _society_from_filename(file_name)
-    _augment_with_manager_info(analysis_obj, member_name, config)
-
-    # Deterministic coverage/missed-opps
-    feature_coverage, missed_opps = ("", "")
     try:
-        if transcript:
-            feature_coverage, missed_opps = _feature_coverage_and_missed(transcript)
-        else:
+        _init_gemini() # Ensure Gemini is configured
+
+        # --- Metadata Fetch ---
+        try:
+             meta = _drive_get_metadata(drive_service, file_id)
+             # Update file_name with potentially more accurate version from metadata
+             file_name = meta.get("name", file_name)
+             mime_type = meta.get("mimeType", file_meta.get("mimeType", ""))
+             created_iso = meta.get("createdTime")
+             logging.info(f"[Gemini] Processing: {file_name} ({mime_type}) | ID: {file_id}")
+        except Exception as e:
+             logging.error(f"Failed to get metadata for file ID {file_id}: {e}")
+             # Update ledger with metadata error and skip processing this file
+             import sheets # Import locally for error handling
+             sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Metadata fetch failed: {e}", config, file_name)
+             return # Stop processing this file
+
+        # --- Basic Info Extraction ---
+        date_out = _pick_date_for_output(file_name, created_iso)
+
+        # --- Download ---
+        tmp_dir = config.get("runtime", {}).get("tmp_dir", "/tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        # Sanitize filename for local path
+        safe_suffix = re.sub(r'[^\w\-_\.]', '_', file_name)
+        local_path = os.path.join(tmp_dir, f"{file_id}_{safe_suffix}")
+
+        try:
+            _, downloaded_mime_type = _download_drive_file(drive_service, file_id, local_path)
+            # Use downloaded mime_type if more accurate or available
+            mime_type = downloaded_mime_type or mime_type
+            logging.info(f"File downloaded to: {local_path}")
+        except Exception as e:
+            logging.error(f"Failed to download file {file_name} (ID: {file_id}): {e}")
+            import sheets
+            sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Download failed: {e}", config, file_name)
+            return # Stop processing this file
+
+        # --- Duration ---
+        duration_min = _probe_duration_minutes(meta, local_path, mime_type)
+
+        # --- Prompt ---
+        master_prompt = _load_master_prompt(config)
+        if not master_prompt:
+             logging.error("Master prompt is empty. Cannot proceed with analysis.")
+             import sheets
+             sheets.update_ledger(gsheets_sheet, file_id, "Error", "Master prompt is empty", config, file_name)
+             return
+
+        # --- Gemini Processing (One-shot or Two-call) ---
+        logging.info(f"Using one-shot mode: {_is_one_shot(config)}")
+        transcript = ""
+        analysis_obj = {}
+
+        if _is_one_shot(config):
+            try:
+                model_to_use = _get_analysis_model(config) # One-shot uses analysis model
+                logging.info(f"Calling Gemini one-shot with model: {model_to_use}")
+                analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, model_to_use)
+                transcript = analysis_obj.get("transcript_full", "") # Attempt to get transcript from JSON
+                if not transcript:
+                     logging.warning(f"Transcript not found in one-shot result for {file_name}")
+            except QuotaExceeded as qe:
+                 logging.error(f"Quota exceeded during one-shot for {file_name}: {qe}")
+                 raise # Re-raise QuotaExceeded to be caught by main loop
+            except Exception as e:
+                 logging.error(f"Error during Gemini one-shot call for {file_name}: {e}", exc_info=True)
+                 import sheets
+                 sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Gemini one-shot failed: {e}", config, file_name)
+                 return # Stop processing this file
+        else: # Two-call approach
+            try:
+                model_to_use = _get_model(config) # Transcription uses primary model
+                logging.info(f"Calling Gemini transcribe with model: {model_to_use}")
+                transcript = _gemini_transcribe(local_path, mime_type, model_to_use)
+                logging.info(f"Transcription complete for {file_name}. Length: {len(transcript)} chars")
+            except QuotaExceeded as qe:
+                logging.error(f"Quota exceeded during transcription for {file_name}: {qe}")
+                raise # Re-raise QuotaExceeded
+            except Exception as e:
+                logging.error(f"Error during Gemini transcription for {file_name}: {e}", exc_info=True)
+                import sheets
+                sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Transcription failed: {e}", config, file_name)
+                return
+
+            if not transcript:
+                 logging.warning(f"Transcription resulted in empty text for {file_name}. Skipping analysis.")
+                 import sheets
+                 sheets.update_ledger(gsheets_sheet, file_id, "Error", "Empty transcript", config, file_name)
+                 return
+
+            try:
+                model_to_use = _get_analysis_model(config) # Analysis uses analysis model
+                logging.info(f"Calling Gemini analyze with model: {model_to_use}")
+                analysis_obj = _gemini_analyze(transcript, master_prompt, model_to_use)
+                # Add transcript to the final JSON object if using two-call
+                analysis_obj["transcript_full"] = transcript
+                logging.info(f"Analysis complete for {file_name}")
+            except QuotaExceeded as qe:
+                logging.error(f"Quota exceeded during analysis for {file_name}: {qe}")
+                raise # Re-raise QuotaExceeded
+            except Exception as e:
+                logging.error(f"Error during Gemini analysis for {file_name}: {e}", exc_info=True)
+                import sheets
+                sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Analysis failed: {e}", config, file_name)
+                return
+
+        # --- Feature Coverage & Missed Opps ---
+        feature_coverage, missed_opps = ("", "")
+        try:
+            # Use transcript for calculation if available and non-empty
+            if transcript:
+                feature_coverage, missed_opps = _feature_coverage_and_missed(transcript)
+            else:
+                # Fallback to values from JSON if transcript is missing (e.g., failed transcription)
+                feature_coverage = analysis_obj.get("Feature Checklist Coverage", "")
+                missed_opps = analysis_obj.get("Missed Opportunities", "")
+        except Exception as e:
+            logging.warning(f"Failed to calculate feature coverage for {file_name}: {e}")
+            # Use defaults from analysis_obj or empty strings
             feature_coverage = analysis_obj.get("Feature Checklist Coverage", "")
             missed_opps = analysis_obj.get("Missed Opportunities", "")
-    except Exception:
-        pass
 
-    # Ensure fields exist
-    analysis_obj.setdefault("Date", "")
-    analysis_obj.setdefault("Meeting duration (min)", "")
-    analysis_obj.setdefault("Feature Checklist Coverage", feature_coverage or "")
-    analysis_obj.setdefault("Missed Opportunities", missed_opps or "")
 
-    # Write
-    _write_success(
-        gsheets_sheet=gsheets_sheet,
-        file_id=file_id,
-        file_name=file_name,
-        date_out=date_out,
-        duration_min=duration_min,
-        feature_coverage=feature_coverage,
-        missed_opps=missed_opps,
-        analysis_obj=analysis_obj,
-        member_name=member_name,
-        config=config,
-    )
+        # --- Write Results ---
+        _write_success(
+            gsheets_sheet=gsheets_sheet,
+            file_id=file_id,
+            file_name=file_name,
+            date_out=date_out,
+            duration_min=duration_min,
+            feature_coverage=feature_coverage,
+            missed_opps=missed_opps,
+            analysis_obj=analysis_obj,
+            member_name=member_name,
+            config=config,
+        )
 
-    logging.info(f"SUCCESS: Processed {file_name} (date={date_out}, duration={duration_min}m)")
+        logging.info(f"SUCCESS: Fully processed {file_name} (date={date_out}, duration={duration_min}m)")
+
+    except QuotaExceeded:
+         # Log and re-raise specifically for main loop to catch
+         logging.error(f"Quota exceeded while processing {file_name}. Propagating error.")
+         raise
+    except Exception as e:
+         # Catch any other unexpected errors during the process
+         logging.error(f"Unexpected critical error processing {file_name}: {e}", exc_info=True)
+         try:
+             # Attempt to update ledger to Error status for unexpected failures
+             import sheets
+             sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Critical unexpected error: {e}", config, file_name)
+         except Exception as le:
+             logging.error(f"Also failed to update ledger for critical error on {file_name}: {le}")
+         # Depending on policy, you might want to raise e here to stop the whole run
+         # or just return to allow processing of other files. Let's return for now.
+         return
+    finally:
+        # --- Cleanup: Remove downloaded file ---
+        if local_path and os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+                logging.info(f"Cleaned up temporary file: {local_path}")
+            except Exception as e:
+                logging.warning(f"Could not remove temporary file {local_path}: {e}")
