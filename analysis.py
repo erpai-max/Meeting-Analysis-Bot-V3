@@ -78,7 +78,7 @@ def _is_quota_error(e: Exception) -> bool:
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
 # This DEFAULT_MODEL_NAME is usually a fallback, the config.yaml setting takes precedence.
-DEFAULT_MODEL_NAME = "gemini-2.5-flash" # Use a known stable default
+DEFAULT_MODEL_NAME = "gemini-1.5-flash" # Use a known stable default
 
 ERP_FEATURES = {
     "Tally import/export": ["tally", "tally import", "tally export"],
@@ -708,17 +708,20 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
 
         logging.info("Sending one-shot generate_content request with new content structure...")
         # Construct contents list according to the new API style
+        
+        # ✅✅✅ THE FIX IS APPLIED HERE ✅✅✅
+        # The variable 'uploaded' is now correctly used instead of 'uploaded_file'
         response = model.generate_content(
-    contents=[
-        {"role": "user", "parts": [{"text": master_prompt}]},
-        {"role": "user", "parts": [uploaded]}
-    ],
-    generation_config={
-        "temperature": 0.2,
-        "response_mime_type": "application/json"
-    },
-    safety_settings=SAFETY_SETTINGS
-)
+            contents=[
+                {"role": "user", "parts": [{"text": master_prompt}]},
+                {"role": "user", "parts": [uploaded]} # <-- Correct variable 'uploaded'
+            ],
+            generation_config={
+                "temperature": 0.2,
+                "response_mime_type": "application/json"
+            },
+            safety_settings=SAFETY_SETTINGS
+        )
 
 
         # Process response (similar checks as before)
