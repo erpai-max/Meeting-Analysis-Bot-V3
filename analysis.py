@@ -1,5 +1,5 @@
 # analysis.py
-# Meeting Analysis Bot - Gemini (Corrected)
+# Meeting Analysis Bot - Gemini (2.5 Model Version)
 # Requirements: google-generativeai >= 0.8.0, google-api-python-client, mutagen (optional), tenacity
 
 # --- Quiet gRPC/absl logs BEFORE importing Google/gRPC libraries ---
@@ -15,6 +15,9 @@ import json
 import logging
 import datetime as dt
 from typing import Dict, Any, Tuple, List, Set, Optional
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 
 # Make sure google-generativeai is installed
 try:
@@ -38,12 +41,29 @@ except ImportError:
     logging.critical("tenacity library not found. Please install it.")
     raise
 
-# =========================
-# Exceptions
-# =========================
-class QuotaExceeded(Exception):
-    """Raised when Gemini quota/rate-limit is hit."""
-    pass
+# Import specific exceptions for robust retries
+try:
+    from google.api_core import exceptions as api_core_exceptions
+    # Define QuotaExceeded before using it in the tuple
+    class QuotaExceeded(Exception):
+        """Raised when Gemini quota/rate-limit is hit."""
+        pass
+    
+    RETRYABLE_EXCEPTIONS = (
+        QuotaExceeded,
+        api_core_exceptions.ResourceExhausted,  # Explicitly include for quota
+        api_core_exceptions.InternalServerError,  # e.g., 500
+        api_core_exceptions.ServiceUnavailable,  # e.g., 503
+        api_core_exceptions.DeadlineExceeded,  # e.g., 504
+    )
+except ImportError:
+    # Define QuotaExceeded even if api_core fails to import
+    class QuotaExceeded(Exception):
+        """Raised when Gemini quota/rate-limit is hit."""
+        pass
+    logging.warning("google.api_core.exceptions not found. Retrying only on QuotaExceeded.")
+    RETRYABLE_EXCEPTIONS = (QuotaExceeded,)
+
 
 # =========================
 # Quota detection helper (strict)
@@ -56,15 +76,13 @@ def _is_quota_error(e: Exception) -> bool:
     msg = str(e).lower()
     # Prefer typed exception if available
     try:
-        # Check if google.api_core.exceptions exists before importing
         import google.api_core.exceptions
         if isinstance(e, google.api_core.exceptions.ResourceExhausted):
             return True
     except (ImportError, AttributeError):
-        pass # Ignore if the specific exception type isn't available
+        pass
     except Exception as ie:
-         # Log unexpected error during check
-         logging.warning(f"Unexpected error checking for ResourceExhausted: {ie}")
+        logging.warning(f"Unexpected error checking for ResourceExhausted: {ie}")
 
     keywords = [
         "resourceexhausted", "resource exhausted",
@@ -77,8 +95,7 @@ def _is_quota_error(e: Exception) -> bool:
 # Constants & Feature Maps
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
-# This DEFAULT_MODEL_NAME is usually a fallback, the config.yaml setting takes precedence.
-DEFAULT_MODEL_NAME = "gemini-1.5-flash" # Use a known stable default
+DEFAULT_MODEL_NAME = "gemini-1.5-flash"  # Use a known stable default
 
 ERP_FEATURES = {
     "Tally import/export": ["tally", "tally import", "tally export"],
@@ -141,11 +158,11 @@ def _drive_get_metadata(drive_service, file_id: str) -> Dict[str, Any]:
     try:
         return drive_service.files().get(fileId=file_id, fields=fields).execute()
     except HttpError as e:
-         logging.error(f"HttpError getting metadata for {file_id}: {e.resp.status} {e.reason}")
-         raise
+        logging.error(f"HttpError getting metadata for {file_id}: {e.resp.status} {e.reason}")
+        raise
     except Exception as e:
-         logging.error(f"Error getting metadata for {file_id}: {e}")
-         raise
+        logging.error(f"Error getting metadata for {file_id}: {e}")
+        raise
 
 def _download_drive_file(drive_service, file_id: str, out_path: str) -> Tuple[str, str]:
     """Download a Drive file to out_path. Returns (mime_type, out_path)."""
@@ -156,11 +173,11 @@ def _download_drive_file(drive_service, file_id: str, out_path: str) -> Tuple[st
         logging.info(f"Attempting download for {meta.get('name', file_id)} ({mime_type}, Size: {file_size} bytes)")
 
         if file_size == 0:
-             logging.warning(f"File {file_id} has size 0 according to metadata. Skipping download.")
-             # Create an empty file locally to avoid errors later if needed, or handle upstream
-             with open(out_path, "wb") as fh_empty:
-                 pass # Creates an empty file
-             return mime_type, out_path # Return mime_type even for empty file
+            logging.warning(f"File {file_id} has size 0 according to metadata. Skipping download.")
+            # Create an empty file locally to avoid errors later if needed, or handle upstream
+            with open(out_path, "wb") as fh_empty:
+                pass # Creates an empty file
+            return mime_type, out_path # Return mime_type even for empty file
 
         request = drive_service.files().get_media(fileId=file_id)
         with io.FileIO(out_path, "wb") as fh:
@@ -174,7 +191,7 @@ def _download_drive_file(drive_service, file_id: str, out_path: str) -> Tuple[st
         # Verify downloaded size matches metadata size
         downloaded_size = os.path.getsize(out_path)
         if downloaded_size != file_size:
-             logging.warning(f"Downloaded file size ({downloaded_size}) differs from metadata size ({file_size}) for {file_id}")
+            logging.warning(f"Downloaded file size ({downloaded_size}) differs from metadata size ({file_size}) for {file_id}")
 
         logging.info(f"File download complete: {out_path}")
         return mime_type, out_path
@@ -190,7 +207,7 @@ _DATE_PATTERNS = [
     (re.compile(r"\b(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{4})\b"), "%d-%m-%Y"), # dd-mm-yyyy with 4-digit year
     (re.compile(r"\b(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{2})\b"), "%d-%m-%y"), # dd-mm-yy with 2-digit year
     (re.compile(r"\b(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})\b"), "%Y-%m-%d"), # yyyy-mm-dd
-    (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), "%Y%m%d"),                 # yyyymmdd (e.g., 20251023)
+    (re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b"), "%Y%m%d"), # yyyymmdd (e.g., 20251023)
 ]
 
 def _format_ddmmyy(d: dt.date) -> str:
@@ -198,7 +215,8 @@ def _format_ddmmyy(d: dt.date) -> str:
     return d.strftime("%d/%m/%y")
 
 def _extract_date_from_name(name: str) -> Optional[str]:
-    if not name: return None
+    if not name:
+        return None
     base = os.path.splitext(name)[0]
     # More robust separator replacement
     base = re.sub(r'[_\-\|\s\.]+', ' ', base).strip()
@@ -223,25 +241,27 @@ def _extract_date_from_name(name: str) -> Optional[str]:
                     parsed = dt.date(yyyy, mm, dd)
                 else:
                     continue # Should not happen with current patterns
-
+                
                 return _format_ddmmyy(parsed)
-            except ValueError: # Handles invalid date combinations (e.g., day 32)
-                 logging.debug(f"Invalid date extracted {g} with format {fmt}, continuing search.")
-                 continue
+            
+            except ValueError:
+                # Handles invalid date combinations (e.g., day 32)
+                logging.debug(f"Invalid date extracted {g} with format {fmt}, continuing search.")
+                continue
             except Exception as e:
-                 logging.warning(f"Error parsing date {g} with format {fmt}: {e}")
-                 continue # Continue searching with other patterns
+                logging.warning(f"Error parsing date {g} with format {fmt}: {e}")
+                continue # Continue searching with other patterns
+                
     logging.debug(f"No date found in filename: {name}")
     return None
 
 def _pick_date_for_output(file_name: str, created_time_iso: Optional[str]) -> str:
-    """
-    1) date in filename → 2) Drive createdTime → 3) "NA"; format dd/mm/yy
-    """
+    """ 1) date in filename → 2) Drive createdTime → 3) "NA"; format dd/mm/yy """
     from_name = _extract_date_from_name(file_name)
     if from_name:
         logging.info(f"Using date from filename: {from_name}")
         return from_name
+
     if created_time_iso:
         try:
             # Handle ISO format like "2025-10-23T06:28:53.640Z"
@@ -254,23 +274,25 @@ def _pick_date_for_output(file_name: str, created_time_iso: Optional[str]) -> st
         except Exception as e:
             logging.warning(f"Could not parse createdTime '{created_time_iso}': {e}")
             pass
+
     logging.info("Could not determine date, using 'NA'")
     return "NA"
 
 # ---------- Duration extraction ----------
 def _millis_to_minutes(ms: int) -> str:
     # Use integer division for whole minutes, rounding might be better if needed
-    minutes = ms // 60000
+    minutes = ms // 60000 
     # Or round: minutes = int(round(ms / 60000.0))
     return f"{minutes}"
 
 def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: str) -> str:
     """
     Prefers Drive videoMediaMetadata.durationMillis (videos).
-    For audio, use mutagen (mp3/m4a/ogg/wav/etc.). Falls back to WAV wave reader if needed.
+    For audio, use mutagen (mp3/m4a/ogg/wav/etc.).
+    Falls back to WAV wave reader if needed.
     Returns integer minutes as a string or "NA".
     """
-    duration_str = "NA" # Default
+    duration_str = "NA"  # Default
 
     # 1) Video metadata from Drive
     try:
@@ -287,6 +309,7 @@ def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: st
 
     # If not found or not video, try audio libraries
     if duration_str == "NA" and mime_type and mime_type.startswith("audio/"):
+        
         # 2) Audio duration via mutagen (preferred for various formats)
         try:
             # Ensure mutagen is installed (should be from requirements.txt)
@@ -295,12 +318,12 @@ def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: st
             if mf is not None and getattr(mf, "info", None) and getattr(mf.info, "length", None):
                 seconds = float(mf.info.length)
                 if seconds > 0:
-                     duration_str = f"{int(round(seconds / 60.0))}"
-                     logging.info(f"Duration from mutagen: {duration_str} min")
-                     return duration_str
+                    duration_str = f"{int(round(seconds / 60.0))}"
+                    logging.info(f"Duration from mutagen: {duration_str} min")
+                    return duration_str
         except ImportError:
-             # Log this once if it happens, should not if reqs are installed
-             logging.warning("mutagen library not found/installed, cannot get duration accurately for some audio types.")
+            # Log this once if it happens, should not if reqs are installed
+            logging.warning("mutagen library not found/installed, cannot get duration accurately for some audio types.")
         except Exception as e:
             logging.warning(f"Mutagen failed to read duration for {local_path}: {e}")
 
@@ -314,35 +337,40 @@ def _probe_duration_minutes(meta: Dict[str, Any], local_path: str, mime_type: st
                     if rate > 0: # Avoid division by zero
                         seconds = frames / float(rate)
                         if seconds >= 0: # Allow 0 seconds
-                             duration_str = f"{int(round(seconds / 60.0))}"
-                             logging.info(f"Duration from wave module: {duration_str} min")
-                             return duration_str
+                            duration_str = f"{int(round(seconds / 60.0))}"
+                            logging.info(f"Duration from wave module: {duration_str} min")
+                            return duration_str
             except ImportError:
-                 # Should not happen for wave module
-                 logging.warning("wave module could not be imported for WAV fallback.")
+                # Should not happen for wave module
+                logging.warning("wave module could not be imported for WAV fallback.")
             except Exception as e:
                 logging.warning(f"Wave module failed for {local_path}: {e}")
 
     if duration_str == "NA":
-         logging.warning(f"Could not determine duration for {local_path}")
-
+        logging.warning(f"Could not determine duration for {local_path}")
     return duration_str
 
 # ---------- Society name from file name ----------
 def _society_from_filename(name: str) -> str:
     """Derive Society Name from file name (drop extension, tidy separators)."""
-    if not name: return "Unknown Society"
+    if not name:
+        return "Unknown Society"
+    
     base = os.path.splitext(name)[0]
+    
     # Replace common separators with spaces and collapse whitespace
     base = re.sub(r'[_\-\|\.]+', ' ', base).strip() # Use regex for robustness
+    
     # Collapse multiple spaces into one
     base = re.sub(r'\s+', ' ', base).strip()
+    
     return base or "Unknown Society" # Return default if name becomes empty
 
 # ---------- ERP/ASP coverage & missed-opps ----------
 def _normalize_text(s: str) -> str:
     import re as _re
-    if not s: return ""
+    if not s:
+        return ""
     # Remove punctuation, convert to lowercase, collapse whitespace
     text = _re.sub(r'[^\w\s]', '', s) # Keep only word chars and spaces
     text = text.lower()
@@ -352,32 +380,42 @@ def _normalize_text(s: str) -> str:
 def _match_coverage(transcript: str, feature_map: Dict[str, List[str]]) -> Tuple[Set[str], Set[str]]:
     # Normalize transcript once
     normalized_transcript = _normalize_text(transcript)
-    if not normalized_transcript: # Handle empty transcript case
-         return set(), set(feature_map.keys()) # All missed if transcript is empty
+    
+    if not normalized_transcript:
+        # Handle empty transcript case
+        return set(), set(feature_map.keys()) # All missed if transcript is empty
 
     covered, missed = set(), set()
+    
     for feature, keys in feature_map.items():
         # Normalize keywords (assuming they are relatively clean already)
         normalized_keys = [_normalize_text(k) for k in keys if k]
+        
         # Check if any normalized keyword is in the normalized transcript
         hit = any(key in normalized_transcript for key in normalized_keys)
+        
         if hit:
             covered.add(feature)
         else:
             missed.add(feature)
+            
     return covered, missed
 
 def _build_feature_summary(covered_all: Set[str], total: int, label: str) -> str:
     pct = 0 if total == 0 else int(round(100 * len(covered_all) / total))
     covered_list = sorted(list(covered_all)) # Convert set to list for sorting
+    
     head = f"{label} Coverage: {len(covered_all)}/{total} ({pct}%)."
+    
     # Only add covered list if it's not empty
     if covered_list:
         head += " Covered: " + ", ".join(covered_list) + "."
+        
     return head
 
 def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
-    if not transcript: # Handle empty transcript
+    if not transcript:
+        # Handle empty transcript
         logging.warning("Cannot calculate feature coverage: transcript is empty.")
         # Return empty strings or appropriate placeholders
         return "NA - Empty Transcript", "NA - Empty Transcript"
@@ -385,50 +423,54 @@ def _feature_coverage_and_missed(transcript: str) -> Tuple[str, str]:
     try:
         erp_cov, erp_missed = _match_coverage(transcript, ERP_FEATURES)
         asp_cov, asp_missed = _match_coverage(transcript, ASP_FEATURES)
-
+    
         feature_coverage_summary = " ".join([
             _build_feature_summary(erp_cov, len(ERP_FEATURES), "ERP"),
             _build_feature_summary(asp_cov, len(ASP_FEATURES), "ASP")
         ]).strip() # Use strip to remove trailing space if one is empty
-
+    
         priority = [
             # Top Priority (Core Value Props)
             "Tally import/export", "Bank reconciliation", "UPI/cards gateway",
             "Managed accounting (bills & receipts)", "Bank reconciliation + suspense",
             "Financial reports (non-audited)", "Dedicated remote accountant",
             # Secondary Priority (Key Differentiators/Common Needs)
-            "Defaulter tracking", "PO / WO approvals", "Inventory",
-            "Automated reminders", "Late fee calc", "GST/TDS reports",
-            "Vendor accounting", "Role-based access",
-             "Finalisation support & audit coordination", "Bookkeeping (all incomes/expenses)"
+            "Defaulter tracking", "PO / WO approvals", "Inventory", 
+            "Reminders & Late fee calc", # Split from one item
+            "GST/TDS reports", "Vendor accounting", "Role-based access",
+            "Finalisation support & audit coordination", "Bookkeeping (all incomes/expenses)"
             # Add others if needed
         ]
 
         missed_all = erp_missed.union(asp_missed)
+        
         if not missed_all:
-             missed_text = "NA" # Indicate nothing missed clearly
+            missed_text = "NA" # Indicate nothing missed clearly
         else:
-             # Sort missed items: priority first, then alphabetically
-             missed_list = sorted(list(missed_all)) # Convert set to list
-             missed_sorted = sorted(
-                 missed_list,
-                 # Key: tuple (0 if priority else 1, index in priority list or large number, feature name)
-                 key=lambda x: (
-                     0 if x in priority else 1,
-                     priority.index(x) if x in priority else float('inf'),
-                     x
-                 )
-             )
-             # Format as bullet points using newline character
-             missed_text = "- " + "\n- ".join(missed_sorted)
-
+            # Sort missed items: priority first, then alphabetically
+            missed_list = sorted(list(missed_all)) # Convert set to list
+            missed_sorted = sorted(
+                missed_list,
+                # Key: tuple (0 if priority else 1, index in priority list or large number, feature name)
+                key=lambda x: (
+                    0 if x in priority else 1, 
+                    priority.index(x) if x in priority else float('inf'), 
+                    x
+                )
+            )
+            # Format as bullet points using newline character
+            missed_text = "- " + "\n- ".join(missed_sorted)
+        
         # Ensure we don't return empty strings if calculation succeeds but finds nothing
         return feature_coverage_summary or "NA", missed_text or "NA"
+
     except Exception as e:
         logging.error(f"Error calculating feature coverage: {e}", exc_info=True)
         return "Error calculating coverage", "Error calculating missed opportunities"
 
+
 # ---------- Gemini config & calls ----------
+
 # Gets the primary model from config, falling back to DEFAULT_MODEL_NAME if needed
 def _get_model(config: Dict[str, Any]) -> str:
     model_name = config.get("google_llm", {}).get("model", DEFAULT_MODEL_NAME)
@@ -458,32 +500,34 @@ def _load_master_prompt(config: Dict[str, Any]) -> str:
         if os.path.exists(prompt_path):
             with open(prompt_path, "r", encoding="utf-8") as f:
                 prompt_content = f.read().strip()
-                if prompt_content:
-                     logging.info(f"Loaded master prompt from {prompt_path}")
-                     return prompt_content
-                else:
-                     logging.warning(f"Prompt file '{prompt_path}' is empty.")
+            if prompt_content:
+                logging.info(f"Loaded master prompt from {prompt_path}")
+                return prompt_content
+            else:
+                logging.warning(f"Prompt file '{prompt_path}' is empty.")
         else:
-             logging.warning(f"Prompt file '{prompt_filename}' not found in CWD or script directory.")
-
+            logging.warning(f"Prompt file '{prompt_filename}' not found in CWD or script directory.")
+            
     except Exception as e:
         logging.error(f"Error loading prompt file '{prompt_filename}': {e}")
 
     # Fallback prompt if file loading fails or file is empty
     logging.warning("Using fallback schema prompt from config or default.")
     fallback_prompt = config.get("google_llm", {}).get("schema_prompt", """
-Act as an expert business analyst for society-management ERP & ASP meetings.
-Analyze the transcript provided.
-Strictly return ONLY a single valid JSON object adhering to the specified schema.
-Do not include any introductory text, closing text, markdown formatting like ```json, or ```.
-If a specific piece of information cannot be found in the transcript, use "NA" as the value for that key.
-For score fields ("Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling", "Closing Effectiveness", "Negotiation Strength"), output numeric strings between "2" (poor/absent) and "10" (excellent). Calculate "Total Score" (sum of 5 scores) and "% Score" (Total/50 as percentage string with one decimal).
-Fill all other keys based on the transcript content or "NA" if absent.
-""").strip()
-    # Ensure fallback prompt is not empty
+    Act as an expert business analyst for society-management ERP & ASP meetings.
+    Analyze the transcript provided.
+    Strictly return ONLY a single valid JSON object adhering to the specified schema.
+    Do not include any introductory text, closing text, markdown formatting like ```json, or ```.
+    If a specific piece of information cannot be found in the transcript, use "NA" as the value for that key.
+    For score fields ("Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling", "Closing Effectiveness", "Negotiation Strength"), output numeric strings between "2" (poor/absent) and "10" (excellent).
+    Calculate "Total Score" (sum of 5 scores) and "% Score" (Total/50 as percentage string with one decimal).
+    Fill all other keys based on the transcript content or "NA" if absent.
+    """).strip()
+    
     if not fallback_prompt:
-         logging.error("CRITICAL: Fallback schema prompt is also empty!")
-         return "" # Return empty or raise error
+        logging.error("CRITICAL: Fallback schema prompt is also empty!")
+        return "" # Return empty or raise error
+        
     return fallback_prompt
 
 def _is_one_shot(config: Dict[str, Any]) -> bool:
@@ -493,6 +537,7 @@ def _is_one_shot(config: Dict[str, Any]) -> bool:
         one_shot_env = env.strip().lower() in ("1", "true", "yes", "on")
         logging.info(f"GEMINI_ONE_SHOT environment variable set to '{env}'. One-shot mode: {one_shot_env}")
         return one_shot_env
+        
     # Then check config, default to True if key missing
     one_shot_config = bool(config.get("google_llm", {}).get("one_shot", True))
     logging.info(f"Config 'one_shot' setting: {one_shot_config}. One-shot mode: {one_shot_config}")
@@ -506,19 +551,22 @@ SAFETY_SETTINGS = {
     'HARM_CATEGORY_DANGEROUS_CONTENT': 'block_none',
 }
 
+
 # =========================================================================
 # GENERATION / TRANSCRIPTION FUNCTIONS (FIXED upload calls)
 # =========================================================================
 
-@retry(reraise=True, stop=stop_after_attempt(3),
-       wait=wait_exponential(multiplier=2, min=2, max=20),
-       # Only retry on QuotaExceeded or specific transient RuntimeErrors
-       retry=retry_if_exception_type((QuotaExceeded,)))
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20),
+       # Updated retry policy to include transient API errors
+       retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS))
 def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
-    """Transcribes audio/video using Gemini with retries for quota."""
+    """Transcribes audio/video using Gemini with retries for quota and transient errors."""
+    
     uploaded_file_name = None # For cleanup
+    
     try:
         model = genai.GenerativeModel(model_name)
+        
         logging.info(f"Uploading file for transcription: {file_path} ({mime_type})")
 
         # Handle empty file before upload
@@ -529,18 +577,21 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
         # ✅ Use genai.upload_file
         uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
         uploaded_file_name = getattr(uploaded, "name", None)
+        
         logging.info(f"File uploaded successfully for transcription: {uploaded_file_name}")
 
         prompt = "Transcribe the audio verbatim with punctuation. Do not summarize. Output plain text only."
+        
         # Construct contents list correctly
         contents = [{"role": "user", "parts": [prompt, uploaded]}]
-        resp = model.generate_content(contents=contents, safety_settings=SAFETY_SETTINGS)
 
+        resp = model.generate_content(contents=contents, safety_settings=SAFETY_SETTINGS)
 
         # Check for blocks or empty candidates
         if getattr(resp, "prompt_feedback", None) and resp.prompt_feedback.block_reason:
             logging.error(f"Transcription prompt blocked: {resp.prompt_feedback.block_reason} - Ratings: {resp.prompt_feedback.safety_ratings}")
             raise RuntimeError(f"Transcription prompt blocked: {resp.prompt_feedback.block_reason}")
+
         if not getattr(resp, "candidates", None):
             logging.error("No candidates returned during transcription. Check safety settings or prompt.")
             finish_reason_detail = getattr(resp, 'finish_reason', 'N/A')
@@ -554,23 +605,23 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
         safety_ratings = getattr(first_candidate, "safety_ratings", None)
 
         if finish_reason not in ('STOP', 'MAX_TOKENS'): # Allow MAX_TOKENS, but log warning
-             logging.warning(f"Transcription generation finished unexpectedly with reason: {finish_reason}")
-             if finish_reason == 'SAFETY':
-                  logging.error(f"Transcription blocked by safety settings: {safety_ratings}")
-                  raise RuntimeError(f"Transcription blocked by safety settings.")
-             else:
-                  raise RuntimeError(f"Transcription failed with finish reason: {finish_reason}")
+            logging.warning(f"Transcription generation finished unexpectedly with reason: {finish_reason}")
+            if finish_reason == 'SAFETY':
+                logging.error(f"Transcription blocked by safety settings: {safety_ratings}")
+                raise RuntimeError(f"Transcription blocked by safety settings.")
+            else:
+                raise RuntimeError(f"Transcription failed with finish reason: {finish_reason}")
         elif finish_reason == 'MAX_TOKENS':
-             logging.warning("Transcription may be incomplete due to MAX_TOKENS limit.")
+            logging.warning("Transcription may be incomplete due to MAX_TOKENS limit.")
 
         text = ""
         # Safely access text from parts
         if getattr(first_candidate, "content", None) and getattr(first_candidate.content, "parts", None):
-             try:
-                 text = first_candidate.content.parts[0].text.strip()
-             except Exception:
-                 text = ""
-
+            try:
+                text = first_candidate.content.parts[0].text.strip()
+            except Exception:
+                text = ""
+        
         if not text and finish_reason == 'STOP':
             # Log if empty but stopped normally (e.g., silent audio)
             logging.warning("Received empty transcript from Gemini (stopped normally).")
@@ -581,32 +632,39 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
         if _is_quota_error(e):
             logging.error(f"Quota exceeded during TRANSCRIBE call: {e}")
             raise QuotaExceeded(str(e)) # Re-raise specific exception
+            
         # Log other errors clearly
         logging.error(f"Error during transcription call: {e}", exc_info=True)
         # Wrap other exceptions in RuntimeError for consistency
         raise RuntimeError(f"Transcription failed: {e}") from e
+
     finally:
         # Cleanup uploaded file on Gemini side
-         if uploaded_file_name:
-              try:
-                   logging.info(f"Attempting to delete uploaded file (transcribe): {uploaded_file_name}")
-                   if hasattr(genai, "delete_file"):
-                       genai.delete_file(uploaded_file_name)
-                       logging.info(f"Successfully deleted uploaded file: {uploaded_file_name}")
-                   else:
-                       logging.warning("genai.delete_file function not found, cannot delete uploaded file.")
-              except Exception as del_e:
-                   # Log deletion error but don't fail the main process
-                   logging.warning(f"Could not delete uploaded file {uploaded_file_name} after transcription: {del_e}")
+        if uploaded_file_name:
+            try:
+                logging.info(f"Attempting to delete uploaded file (transcribe): {uploaded_file_name}")
+                # ✅ Add hasattr check for future-proofing
+                if hasattr(genai, "delete_file"):
+                    genai.delete_file(uploaded_file_name)
+                    logging.info(f"Successfully deleted uploaded file: {uploaded_file_name}")
+                else:
+                    logging.warning("genai.delete_file function not found, cannot delete uploaded file.")
+            except Exception as del_e:
+                # Log deletion error but don't fail the main process
+                logging.warning(f"Could not delete uploaded file {uploaded_file_name} after transcription: {del_e}")
 
-@retry(reraise=True, stop=stop_after_attempt(3),
-       wait=wait_exponential(multiplier=2, min=2, max=20),
-       retry=retry_if_exception_type((QuotaExceeded,)))
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20),
+       # Updated retry policy
+       retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS))
 def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dict[str, Any]:
     """Analyzes transcript using Gemini, expecting JSON output."""
+    
     try:
         model = genai.GenerativeModel(model_name)
+        
         logging.info(f"Sending analysis request with transcript length: {len(transcript)} chars")
+
         # Construct contents list correctly for analysis
         contents = [{"role": "user", "parts": [master_prompt, "\n\n---\nMEETING TRANSCRIPT:\n", transcript]}]
 
@@ -616,13 +674,14 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
                 "temperature": 0.2, # Low temperature for consistent JSON structure
                 "response_mime_type": "application/json",
             },
-             safety_settings=SAFETY_SETTINGS
+            safety_settings=SAFETY_SETTINGS
         )
 
         # Check for blocks or empty candidates
         if getattr(resp, "prompt_feedback", None) and resp.prompt_feedback.block_reason:
             logging.error(f"Analysis prompt blocked: {resp.prompt_feedback.block_reason} - Ratings: {resp.prompt_feedback.safety_ratings}")
             raise RuntimeError(f"Analysis prompt blocked: {resp.prompt_feedback.block_reason}")
+
         if not getattr(resp, "candidates", None):
             logging.error("No candidates returned during analysis.")
             finish_reason_detail = getattr(resp, 'finish_reason', 'N/A')
@@ -635,14 +694,14 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
         safety_ratings = getattr(first_candidate, "safety_ratings", None)
 
         if finish_reason != 'STOP':
-             logging.warning(f"Analysis generation finished unexpectedly with reason: {finish_reason}")
-             if finish_reason == 'SAFETY':
-                  logging.error(f"Analysis blocked by safety settings: {safety_ratings}")
-                  raise RuntimeError(f"Analysis blocked by safety settings.")
-             elif finish_reason == 'MAX_TOKENS':
-                  logging.error("Analysis response might be truncated due to MAX_TOKENS limit.")
-             else:
-                  raise RuntimeError(f"Analysis failed with finish reason: {finish_reason}")
+            logging.warning(f"Analysis generation finished unexpectedly with reason: {finish_reason}")
+            if finish_reason == 'SAFETY':
+                logging.error(f"Analysis blocked by safety settings: {safety_ratings}")
+                raise RuntimeError(f"Analysis blocked by safety settings.")
+            elif finish_reason == 'MAX_TOKENS':
+                logging.error("Analysis response might be truncated due to MAX_TOKENS limit.")
+            else:
+                raise RuntimeError(f"Analysis failed with finish reason: {finish_reason}")
 
         # Robust JSON parsing from parts
         raw = ""
@@ -651,7 +710,7 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
                 raw = first_candidate.content.parts[0].text.strip()
             except Exception:
                 raw = ""
-
+        
         if raw.startswith("```json"):
             raw = raw[7:]
         if raw.endswith("```"):
@@ -667,7 +726,7 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
         except json.JSONDecodeError as je:
             logging.error(f"Failed to parse JSON from analysis model. Raw response sample: '{raw[:500]}...'")
             raise RuntimeError(f"Failed to parse JSON from analysis model: {je}") from je
-
+            
         if not isinstance(data, dict):
             logging.error(f"Analysis output is not a JSON object. Type: {type(data)}. Raw sample: '{raw[:500]}...'")
             raise RuntimeError("Analysis output is not a JSON object.")
@@ -679,30 +738,37 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
         if _is_quota_error(e):
             logging.error(f"Quota exceeded during ANALYZE call: {e}")
             raise QuotaExceeded(str(e))
+            
         logging.error(f"Error during analysis call: {e}", exc_info=True)
         raise RuntimeError(f"Analysis failed: {e}") from e
+
 
 # =========================================================================
 # == CORRECTED _gemini_one_shot FUNCTION (Fixes NameError) ==
 # =========================================================================
-@retry(reraise=True, stop=stop_after_attempt(3),
-       wait=wait_exponential(multiplier=2, min=2, max=20),
-       retry=retry_if_exception_type((QuotaExceeded,)))
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20),
+       # Updated retry policy
+       retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS))
 def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_name: str, config: Dict[str, Any]) -> Dict[str, Any]:
     """One-shot analysis using Gemini with file upload (fixed to genai.upload_file) and structured prompt."""
+    
     uploaded_file_name = None # For potential cleanup if needed and possible
+    
     try:
         model = genai.GenerativeModel(model_name)
 
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
             logging.warning(f"One-shot input file is empty or missing: {file_path}. Returning error dict.")
+            # Return a dict that can be handled by _write_success, indicating error
             return {"error": "Input file was empty", "Risks / Unresolved Issues": "Input file was empty", "Society Name": f"EmptyFile_{os.path.basename(file_path)}"}
 
         logging.info(f"Uploading file via genai.upload_file for one-shot: {file_path}")
         
-        # Use genai.upload_file (handles the v1beta/ragStoreName issue)
+        # ✅ Use genai.upload_file (handles the v1beta/ragStoreName issue)
         uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
         uploaded_file_name = getattr(uploaded, "name", None)
+        
         logging.info(f"File uploaded successfully for one-shot: {uploaded_file_name}")
 
         logging.info("Sending one-shot generate_content request with new content structure...")
@@ -723,41 +789,44 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
 
         # Process response
         if getattr(response, "prompt_feedback", None) and response.prompt_feedback.block_reason:
-             logging.error(f"One-shot prompt blocked: {response.prompt_feedback.block_reason} - Ratings: {response.prompt_feedback.safety_ratings}")
-             raise RuntimeError(f"Prompt blocked due to {response.prompt_feedback.block_reason}")
+            logging.error(f"One-shot prompt blocked: {response.prompt_feedback.block_reason} - Ratings: {response.prompt_feedback.safety_ratings}")
+            raise RuntimeError(f"Prompt blocked due to {response.prompt_feedback.block_reason}")
+
         if not getattr(response, "candidates", None):
-             logging.error("No candidates returned from one-shot call.")
-             finish_reason_detail = getattr(response, 'finish_reason', 'N/A')
-             safety_ratings_detail = getattr(response, 'safety_ratings', 'N/A')
-             logging.error(f"Overall finish reason: {finish_reason_detail}, Safety Ratings: {safety_ratings_detail}")
-             raise RuntimeError("No response candidates received from Gemini.")
+            logging.error("No candidates returned from one-shot call.")
+            finish_reason_detail = getattr(response, 'finish_reason', 'N/A')
+            safety_ratings_detail = getattr(response, 'safety_ratings', 'N/A')
+            logging.error(f"Overall finish reason: {finish_reason_detail}, Safety Ratings: {safety_ratings_detail}")
+            raise RuntimeError("No response candidates received from Gemini.")
 
         first_candidate = response.candidates[0]
         finish_reason = getattr(first_candidate, "finish_reason", None)
         safety_ratings = getattr(first_candidate, "safety_ratings", None)
 
         if finish_reason != 'STOP':
-             logging.warning(f"One-shot generation finished unexpectedly with reason: {finish_reason}")
-             if finish_reason == 'SAFETY':
-                  logging.error(f"One-shot blocked by safety settings: {safety_ratings}")
-                  raise RuntimeError(f"One-shot blocked by safety settings.")
-             elif finish_reason == 'MAX_TOKENS':
-                  logging.error("One-shot response might be truncated due to MAX_TOKENS limit.")
-             else:
-                  raise RuntimeError(f"One-shot failed with finish reason: {finish_reason}")
+            logging.warning(f"One-shot generation finished unexpectedly with reason: {finish_reason}")
+            if finish_reason == 'SAFETY':
+                logging.error(f"One-shot blocked by safety settings: {safety_ratings}")
+                raise RuntimeError(f"One-shot blocked by safety settings.")
+            elif finish_reason == 'MAX_TOKENS':
+                logging.error("One-shot response might be truncated due to MAX_TOKENS limit.")
+            else:
+                raise RuntimeError(f"One-shot failed with finish reason: {finish_reason}")
 
         # Robust JSON parsing from parts
         raw = ""
         if getattr(first_candidate, "content", None) and getattr(first_candidate.content, "parts", None):
-             try:
-                 raw = first_candidate.content.parts[0].text.strip()
-             except Exception:
-                 raw = ""
-
-        if raw.startswith("```json"): raw = raw[7:]
-        if raw.endswith("```"): raw = raw[:-3]
+            try:
+                raw = first_candidate.content.parts[0].text.strip()
+            except Exception:
+                raw = ""
+        
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
         raw = raw.strip()
-
+        
         if not raw:
             logging.error("Received empty response during one-shot analysis.")
             raise RuntimeError("Empty one-shot response from Gemini.")
@@ -767,7 +836,7 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
         except json.JSONDecodeError as je:
             logging.error(f"Failed to parse JSON from one-shot model. Raw sample: '{raw[:500]}...'")
             raise RuntimeError(f"Failed to parse JSON from one-shot model: {je}") from je
-
+            
         if not isinstance(data, dict):
             logging.error(f"One-shot output is not a JSON object. Type: {type(data)}. Raw sample: '{raw[:500]}...'")
             raise RuntimeError("One-shot output is not a JSON object.")
@@ -782,16 +851,16 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
                 transcript_text = _gemini_transcribe(file_path, mime_type, transcription_model)
                 data["transcript_full"] = transcript_text or "Transcription failed or empty"
                 if transcript_text:
-                     logging.info("Successfully added transcript via separate call.")
+                    logging.info("Successfully added transcript via separate call.")
                 else:
-                     logging.warning("Separate transcription resulted in empty text.")
+                    logging.warning("Separate transcription resulted in empty text.")
             except QuotaExceeded as qe_transcribe:
-                 logging.error(f"Quota exceeded during separate transcription attempt: {qe_transcribe}")
-                 data["transcript_full"] = "Transcription failed due to quota"
+                logging.error(f"Quota exceeded during separate transcription attempt: {qe_transcribe}")
+                data["transcript_full"] = "Transcription failed due to quota"
             except Exception as te:
                 logging.error(f"Failed to get transcript separately after one-shot: {te}")
                 data["transcript_full"] = f"Transcription failed: {str(te)[:100]}"
-
+                
         return data
 
     except Exception as e:
@@ -802,17 +871,19 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
         raise RuntimeError(f"One-shot processing failed: {e}") from e
 
     finally:
-         # Cleanup for uploaded file if possible
-         if uploaded_file_name:
-              try:
-                   if hasattr(genai, 'delete_file'):
-                        logging.info(f"Attempting delete on uploaded file (new one-shot): {uploaded_file_name}")
-                        genai.delete_file(uploaded_file_name)
-                        logging.info(f"Deleted uploaded file (new one-shot): {uploaded_file_name}")
-                   else:
-                        logging.warning("genai.delete_file not found, cannot explicitly delete file from new one-shot.")
-              except Exception as del_e:
-                   logging.warning(f"Could not delete uploaded file {uploaded_file_name} (new one-shot): {del_e}")
+        # Cleanup for uploaded file if possible
+        if uploaded_file_name:
+            try:
+                # ✅ Add hasattr check for future-proofing
+                if hasattr(genai, 'delete_file'):
+                    logging.info(f"Attempting delete on uploaded file (new one-shot): {uploaded_file_name}")
+                    genai.delete_file(uploaded_file_name)
+                    logging.info(f"Deleted uploaded file (new one-shot): {uploaded_file_name}")
+                else:
+                    logging.warning("genai.delete_file not found, cannot explicitly delete file from new one-shot.")
+            except Exception as del_e:
+                logging.warning(f"Could not delete uploaded file {uploaded_file_name} (new one-shot): {del_e}")
+
 
 # ---------- Manager info enrichment ----------
 def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]) -> None:
@@ -821,20 +892,22 @@ def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, c
     Overrides existing values in analysis_obj with info from config based on member_name.
     """
     if not member_name:
-         logging.warning("Cannot augment manager info: member_name is empty.")
-         analysis_obj["Owner (Who handled the meeting)"] = "Unknown"
-         # Ensure other keys exist with default values if owner is unknown
-         analysis_obj.setdefault("Email Id", "")
-         analysis_obj.setdefault("Manager", "")
-         analysis_obj.setdefault("Team", "")
-         analysis_obj.setdefault("Manager Email", "")
-         return
+        logging.warning("Cannot augment manager info: member_name is empty.")
+        analysis_obj["Owner (Who handled the meeting)"] = "Unknown"
+        # Ensure other keys exist with default values if owner is unknown
+        analysis_obj.setdefault("Email Id", "")
+        analysis_obj.setdefault("Manager", "")
+        analysis_obj.setdefault("Team", "")
+        analysis_obj.setdefault("Manager Email", "")
+        return
 
     owner_name = member_name.strip()
     analysis_obj["Owner (Who handled the meeting)"] = owner_name # Set owner first
+
     try:
         # Assume keys in manager_map match member_name case/spacing or normalize here
         manager_map = config.get("manager_map", {})
+        
         # Case-insensitive lookup (optional, if map keys might not match exactly)
         member_info = None
         for key, info in manager_map.items():
@@ -853,31 +926,33 @@ def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, c
             if manager_name:
                 manager_emails = config.get("manager_emails", {})
                 manager_name_stripped = manager_name.strip()
+                
                 mgr_email = None
                 for key, email in manager_emails.items():
                      if key.strip().lower() == manager_name_stripped.lower():
-                          mgr_email = email
-                          break
-
+                        mgr_email = email
+                        break
+                        
                 analysis_obj["Manager Email"] = mgr_email if mgr_email is not None else analysis_obj.get("Manager Email", "")
             else:
-                 analysis_obj.setdefault("Manager Email", "")
+                analysis_obj.setdefault("Manager Email", "")
         else:
             logging.warning(f"No manager map entry found or entry invalid for owner: '{owner_name}'")
             analysis_obj.setdefault("Email Id", "")
             analysis_obj.setdefault("Manager", "")
             analysis_obj.setdefault("Team", "")
             analysis_obj.setdefault("Manager Email", "")
-
+            
     except Exception as e:
         logging.error(f"Error during manager info augmentation for '{owner_name}': {e}", exc_info=True)
+        # Ensure owner is still set even if augmentation fails
         analysis_obj["Owner (Who handled the meeting)"] = owner_name
 
+
 # ---------- Sheets I/O ----------
-def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, duration_min: str,
-                   feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any],
-                   member_name: str, config: Dict[str, Any]):
+def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, duration_min: str, feature_coverage: str, missed_opps: str, analysis_obj: Dict[str, Any], member_name: str, config: Dict[str, Any]):
     """Writes the processed analysis object to Google Sheets and updates the ledger."""
+    
     try:
         import sheets
     except ImportError:
@@ -888,9 +963,9 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
     if not isinstance(analysis_obj, dict):
         logging.error(f"Analysis result for {file_name} is not a dictionary (Type: {type(analysis_obj)}). Cannot write to sheet.")
         try:
-             sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Invalid analysis result type: {type(analysis_obj)}", config, file_name)
+            sheets.update_ledger(gsheets_sheet, file_id, "Error", f"Invalid analysis result type: {type(analysis_obj)}", config, file_name)
         except Exception as le:
-             logging.error(f"Also failed to update ledger for invalid type error on {file_name}: {le}")
+            logging.error(f"Also failed to update ledger for invalid type error on {file_name}: {le}")
         raise ValueError("Analysis result is not a dictionary.") # Raise error to indicate failure
 
     # Replace None values with "NA" for consistency, unless it's a score field
@@ -898,32 +973,35 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
         "Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling",
         "Closing Effectiveness", "Negotiation Strength", "Total Score", "% Score"
     }
+    
     cleaned_analysis = {}
+    
     # Use default headers from sheets module if available to ensure all expected columns are present
     expected_headers = getattr(sheets, "DEFAULT_HEADERS", list(analysis_obj.keys()))
-
-    for key in expected_headers: # Iterate through expected headers
+    
+    for key in expected_headers:
+        # Iterate through expected headers
         value = analysis_obj.get(key) # Get value from analysis object
-
+        
         if value is None and key not in score_keys:
-             cleaned_analysis[key] = "NA"
+            cleaned_analysis[key] = "NA"
         elif value is None and key in score_keys:
-             logging.warning(f"Score field '{key}' is None for {file_name}. Defaulting to '2'.")
-             cleaned_analysis[key] = "2" # Default missing score
+            logging.warning(f"Score field '{key}' is None for {file_name}. Defaulting to '2'.")
+            cleaned_analysis[key] = "2" # Default missing score
         else:
-             cleaned_analysis[key] = str(value) if value is not None else "NA"
+            cleaned_analysis[key] = str(value) if value is not None else "NA"
 
     # Add unexpected keys
     for key, value in analysis_obj.items():
-         if key not in cleaned_analysis:
-              logging.warning(f"Unexpected key '{key}' found in analysis_obj for {file_name}. Including it.")
-              cleaned_analysis[key] = str(value) if value is not None else "NA"
+        if key not in cleaned_analysis:
+            logging.warning(f"Unexpected key '{key}' found in analysis_obj for {file_name}. Including it.")
+            cleaned_analysis[key] = str(value) if value is not None else "NA"
 
     # --- Populate Standard Fields ---
     cleaned_analysis["Date"] = date_out if date_out != "NA" else "NA"
     cleaned_analysis["Meeting duration (min)"] = duration_min if duration_min != "NA" else "NA"
     cleaned_analysis["Society Name"] = _society_from_filename(file_name)
-
+    
     cleaned_analysis["Feature Checklist Coverage"] = feature_coverage if feature_coverage and "Error" not in feature_coverage else cleaned_analysis.get("Feature Checklist Coverage", "NA")
     cleaned_analysis["Missed Opportunities"] = missed_opps if missed_opps and "Error" not in missed_opps else cleaned_analysis.get("Missed Opportunities", "NA")
 
@@ -931,66 +1009,69 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
     try:
         _augment_with_manager_info(cleaned_analysis, member_name, config)
     except Exception as e:
-         logging.error(f"Failed during manager augmentation for {file_name}: {e}. Proceeding without full augmentation.")
-         cleaned_analysis["Owner (Who handled the meeting)"] = member_name or "Unknown"
+        logging.error(f"Failed during manager augmentation for {file_name}: {e}. Proceeding without full augmentation.")
+        cleaned_analysis["Owner (Who handled the meeting)"] = member_name or "Unknown"
 
     # --- Calculate Scores if Missing or Invalid (Defensive) ---
-    scores_valid = True
-    individual_scores = []
-    score_keys_individual = ["Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling", "Closing Effectiveness", "Negotiation Strength"]
-
-    for key in score_keys_individual:
-         score_str = cleaned_analysis.setdefault(key, "2")
-         try:
-             score_val = int(score_str)
-             if not (2 <= score_val <= 10):
-                  logging.warning(f"Score '{score_val}' for {key} out of range (2-10) in {file_name}. Clamping to 2.")
-                  score_val = 2
-                  cleaned_analysis[key] = "2"
-             individual_scores.append(score_val)
-         except (ValueError, TypeError):
-             logging.warning(f"Invalid score value '{score_str}' for {key} in {file_name}. Defaulting score part to 2.")
-             individual_scores.append(2)
-             cleaned_analysis[key] = "2"
-             scores_valid = False
-
     try:
+        scores_valid = True
+        individual_scores = []
+        score_keys_individual = ["Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling", "Closing Effectiveness", "Negotiation Strength"]
+    
+        for key in score_keys_individual:
+            score_str = cleaned_analysis.setdefault(key, "2")
+            try:
+                score_val = int(score_str)
+                if not (2 <= score_val <= 10):
+                    logging.warning(f"Score '{score_val}' for {key} out of range (2-10) in {file_name}. Clamping to 2.")
+                    score_val = 2
+                    cleaned_analysis[key] = "2"
+                individual_scores.append(score_val)
+            except (ValueError, TypeError):
+                logging.warning(f"Invalid score value '{score_str}' for {key} in {file_name}. Defaulting score part to 2.")
+                individual_scores.append(2)
+                cleaned_analysis[key] = "2"
+                scores_valid = False
+
         expected_total = sum(individual_scores)
         current_total_str = cleaned_analysis.get("Total Score")
+        
         recalculate = not scores_valid
-
+        
         if not recalculate and current_total_str and current_total_str != "NA":
-             try:
-                  current_total = int(current_total_str)
-                  if current_total != expected_total:
-                       logging.warning(f"Total Score mismatch for {file_name}. Model: {current_total}, Calculated: {expected_total}. Recalculating.")
-                       recalculate = True
-             except (ValueError, TypeError):
-                  logging.warning(f"Invalid Total Score '{current_total_str}' from model for {file_name}. Recalculating.")
-                  recalculate = True
+            try:
+                current_total = int(current_total_str)
+                if current_total != expected_total:
+                    logging.warning(f"Total Score mismatch for {file_name}. Model: {current_total}, Calculated: {expected_total}. Recalculating.")
+                    recalculate = True
+            except (ValueError, TypeError):
+                logging.warning(f"Invalid Total Score '{current_total_str}' from model for {file_name}. Recalculating.")
+                recalculate = True
         else:
-             recalculate = True
+            recalculate = True
 
         if recalculate:
-             cleaned_analysis["Total Score"] = str(expected_total)
-             percent_score = (expected_total / 50.0) * 100.0
-             cleaned_analysis["% Score"] = f"{percent_score:.1f}%"
-             logging.info(f"Recalculated scores for {file_name}: Total={expected_total}, Percent={cleaned_analysis['% Score']}")
+            cleaned_analysis["Total Score"] = str(expected_total)
+            percent_score = (expected_total / 50.0) * 100.0
+            cleaned_analysis["% Score"] = f"{percent_score:.1f}%"
+            logging.info(f"Recalculated scores for {file_name}: Total={expected_total}, Percent={cleaned_analysis['% Score']}")
         else:
-             current_percent_str = cleaned_analysis.get("% Score", "")
-             if not (current_percent_str.endswith('%') and ('.' in current_percent_str or current_percent_str[:-1].isdigit())):
-                 logging.warning(f"Formatting existing % Score '{current_percent_str}' for {file_name}")
-                 try:
-                     percent_val = float(re.sub(r'[^\d.]', '', current_percent_str))
-                     cleaned_analysis["% Score"] = f"{percent_val:.1f}%"
-                 except Exception:
-                     logging.error(f"Could not reformat existing % Score for {file_name}. Setting to NA.")
-                     cleaned_analysis["% Score"] = "NA"
+            # Ensure existing % score is formatted correctly
+            current_percent_str = cleaned_analysis.get("% Score", "")
+            if not (current_percent_str.endswith('%') and ('.' in current_percent_str or current_percent_str[:-1].isdigit())):
+                logging.warning(f"Formatting existing % Score '{current_percent_str}' for {file_name}")
+                try:
+                    percent_val = float(re.sub(r'[^\d.]', '', current_percent_str))
+                    cleaned_analysis["% Score"] = f"{percent_val:.1f}%"
+                except Exception:
+                    logging.error(f"Could not reformat existing % Score for {file_name}. Setting to NA.")
+                    cleaned_analysis["% Score"] = "NA"
 
     except Exception as score_calc_e:
         logging.error(f"Error during score validation/recalculation for {file_name}: {score_calc_e}")
         cleaned_analysis.setdefault("Total Score", "NA")
         cleaned_analysis.setdefault("% Score", "NA")
+
 
     # --- Write to Sheets ---
     status_note = f"Processed via Gemini model; duration={duration_min}m"
@@ -1007,15 +1088,18 @@ def _write_success(gsheets_sheet, file_id: str, file_name: str, date_out: str, d
         else:
             logging.critical("CRITICAL: Function 'write_analysis_result' or 'append_result' not found in sheets module. Cannot write results.")
             raise AttributeError("Required sheet writing function not found.")
+            
     except Exception as e:
-         logging.error(f"CRITICAL: Failed to write analysis results to sheet for {file_name}: {e}", exc_info=True)
-         try:
-              error_msg = f"Failed write results: {str(e)[:200]}"
-              sheets.update_ledger(gsheets_sheet, file_id, "Error", error_msg, config, file_name)
-              logging.info(f"Updated ledger back to 'Error' for {file_name} due to sheet write failure.")
-         except Exception as le:
-              logging.critical(f"CRITICAL: Also failed to update ledger back to Error status for {file_name}: {le}")
-         raise RuntimeError(f"Failed to write results to sheet for {file_name}") from e
+        logging.error(f"CRITICAL: Failed to write analysis results to sheet for {file_name}: {e}", exc_info=True)
+        try:
+            error_msg = f"Failed write results: {str(e)[:200]}"
+            sheets.update_ledger(gsheets_sheet, file_id, "Error", error_msg, config, file_name)
+            logging.info(f"Updated ledger back to 'Error' for {file_name} due to sheet write failure.")
+        except Exception as le:
+            logging.critical(f"CRITICAL: Also failed to update ledger back to Error status for {file_name}: {le}")
+        
+        raise RuntimeError(f"Failed to write results to sheet for {file_name}") from e
+
 
 # =========================
 # Entry point
@@ -1040,11 +1124,13 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
             file_name = meta.get("name", file_name) # Update name
             mime_type = meta.get("mimeType", file_meta.get("mimeType", ""))
             created_iso = meta.get("createdTime")
+
             if not file_name or file_name.startswith("Unknown_"):
                  logging.warning(f"Filename missing or generic in metadata for {file_id}. Using fallback.")
                  file_name = f"File_{file_id}"
-
+                 
             logging.info(f"[Gemini] Processing: '{file_name}' ({mime_type}) | ID: {file_id}")
+            
         except Exception as e:
             error_detail = f"Metadata fetch failed: {str(e)[:200]}"
             logging.error(error_detail, exc_info=True)
@@ -1068,7 +1154,7 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
         try:
             logging.info(f"Starting download for '{file_name}'...")
             _, downloaded_mime_type = _download_drive_file(drive_service, file_id, local_path)
-            mime_type = downloaded_mime_type or mime_type
+            mime_type = downloaded_mime_type or mime_type # Prefer downloaded mime_type if available
             logging.info(f"File downloaded to: {local_path}")
         except Exception as e:
             error_detail = f"Download failed: {str(e)[:200]}"
@@ -1077,7 +1163,7 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
                 import sheets
                 sheets.update_ledger(gsheets_sheet, file_id, "Error", error_detail, config, file_name)
             except Exception as le:
-                 logging.error(f"Failed to import sheets or update ledger for download error on {file_id}: {le}")
+                logging.error(f"Failed to import sheets or update ledger for download error on {file_id}: {le}")
             raise RuntimeError(f"Download failed for {file_id}") from e
 
         # --- Duration ---
@@ -1090,7 +1176,7 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
                 import sheets
                 sheets.update_ledger(gsheets_sheet, file_id, "Error", "Master prompt could not be loaded", config, file_name)
             except Exception as le:
-                 logging.error(f"Failed to import sheets or update ledger for prompt error on {file_id}: {le}")
+                logging.error(f"Failed to import sheets or update ledger for prompt error on {file_id}: {le}")
             raise ValueError("Master prompt is empty, cannot proceed.")
 
         # --- Gemini Processing (One-shot or Two-call) ---
@@ -1113,29 +1199,30 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
             if not transcript:
                 logging.error(f"Transcription resulted in empty text for '{file_name}'. Analysis cannot proceed.")
                 try:
-                     import sheets
-                     sheets.update_ledger(gsheets_sheet, file_id, "Error", "Empty transcript", config, file_name)
+                    import sheets
+                    sheets.update_ledger(gsheets_sheet, file_id, "Error", "Empty transcript", config, file_name)
                 except Exception as le:
-                     logging.error(f"Failed to update ledger for empty transcript on {file_id}: {le}")
+                    logging.error(f"Failed to update ledger for empty transcript on {file_id}: {le}")
                 raise ValueError("Empty transcript received, analysis skipped.")
 
             analyze_model = _get_analysis_model(config)
             logging.info(f"Calling Gemini analyze with model: {analyze_model}")
             analysis_obj = _gemini_analyze(transcript, master_prompt, analyze_model)
-            analysis_obj["transcript_full"] = transcript
+            analysis_obj["transcript_full"] = transcript # Ensure transcript is included
             logging.info(f"Analysis complete for '{file_name}'")
 
         # --- Feature Coverage & Missed Opps ---
         feature_coverage, missed_opps = ("", "")
         try:
+            # Use transcript from 'transcript' var (two-shot) or 'transcript_full' (one-shot)
             calc_transcript = transcript or analysis_obj.get("transcript_full", "")
             if calc_transcript and "Transcription failed" not in calc_transcript:
-                 feature_coverage, missed_opps = _feature_coverage_and_missed(calc_transcript)
-                 logging.info("Calculated feature coverage and missed opportunities.")
+                feature_coverage, missed_opps = _feature_coverage_and_missed(calc_transcript)
+                logging.info("Calculated feature coverage and missed opportunities.")
             else:
-                 logging.warning("Transcript unavailable or failed, cannot calculate coverage. Using defaults from analysis.")
-                 feature_coverage = analysis_obj.get("Feature Checklist Coverage", "NA")
-                 missed_opps = analysis_obj.get("Missed Opportunities", "NA")
+                logging.warning("Transcript unavailable or failed, cannot calculate coverage. Using defaults from analysis.")
+                feature_coverage = analysis_obj.get("Feature Checklist Coverage", "NA")
+                missed_opps = analysis_obj.get("Missed Opportunities", "NA")
         except Exception as e:
             logging.error(f"Error calculating feature coverage for '{file_name}': {e}")
             feature_coverage = "Error in calculation"
@@ -1154,15 +1241,16 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
             member_name=member_name,
             config=config,
         )
-
+        
         logging.info(f"SUCCESS: Fully processed and results written for '{file_name}'")
 
     except QuotaExceeded as qe:
-         logging.error(f"Quota Exceeded during processing of '{file_name}': {qe}. Propagating error.")
-         raise
+        logging.error(f"Quota Exceeded during processing of '{file_name}': {qe}. Propagating error.")
+        raise # Re-raise to be caught by main loop for backoff
     except (RuntimeError, ValueError, FileNotFoundError, AttributeError, Exception) as e:
-         logging.error(f"CRITICAL failure during processing of '{file_name}': {e}. File should be quarantined by main loop.", exc_info=True)
-         raise
+        logging.error(f"CRITICAL failure during processing of '{file_name}': {e}. File should be quarantined by main loop.", exc_info=True)
+        raise # Re-raise to be caught by main loop and marked as Error
+    
     finally:
         if local_path and os.path.exists(local_path):
             try:
