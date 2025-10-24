@@ -709,13 +709,17 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
         logging.info("Sending one-shot generate_content request with new content structure...")
         # Construct contents list according to the new API style
         response = model.generate_content(
-            contents=[{"role": "user", "parts": [master_prompt, uploaded]}], # Pass prompt text and uploaded file object in parts
-            generation_config={
-                "temperature": 0.2,
-                "response_mime_type": "application/json",
-            },
-            safety_settings=SAFETY_SETTINGS
-        )
+    contents=[
+        {"role": "user", "parts": [{"text": master_prompt}]},
+        {"role": "user", "parts": [uploaded_file]}
+    ],
+    generation_config={
+        "temperature": 0.2,
+        "response_mime_type": "application/json"
+    },
+    safety_settings=SAFETY_SETTINGS
+)
+
 
         # Process response (similar checks as before)
         if getattr(response, "prompt_feedback", None) and response.prompt_feedback.block_reason:
