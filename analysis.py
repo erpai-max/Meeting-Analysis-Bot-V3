@@ -78,7 +78,7 @@ def _is_quota_error(e: Exception) -> bool:
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
 # This DEFAULT_MODEL_NAME is usually a fallback, the config.yaml setting takes precedence.
-DEFAULT_MODEL_NAME = "gemini-1.5-flash" # Use a known stable default
+DEFAULT_MODEL_NAME = "gemini-2.5-flash" # Use a known stable default
 
 ERP_FEATURES = {
     "Tally import/export": ["tally", "tally import", "tally export"],
