@@ -711,7 +711,7 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
         response = model.generate_content(
     contents=[
         {"role": "user", "parts": [{"text": master_prompt}]},
-        {"role": "user", "parts": [uploaded_file]}
+        {"role": "user", "parts": [uploaded]}
     ],
     generation_config={
         "temperature": 0.2,
