@@ -29,14 +29,14 @@ jobs:
 
       # Updated installation step
       - name: Install dependencies and Verify
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          python -m pip install --upgrade pip
-          # Added --no-cache-dir to force fresh install from updated requirements.txt
-          pip install --no-cache-dir -r requirements.txt
-          echo "--- VERIFYING google-generativeai VERSION ---"
-          pip show google-generativeai
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y ffmpeg
+    python -m pip install --upgrade pip
+    pip uninstall -y google-generativeai google-api-python-client oauth2client || true
+    pip install --no-cache-dir -r requirements.txt
+    echo "--- VERIFYING google-generativeai VERSION ---"
+    pip show google-generativeai
           # Added verification for the other key library
           echo "--- VERIFYING google-api-python-client VERSION ---"
           pip show google-api-python-client
