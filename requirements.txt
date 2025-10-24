@@ -1,31 +1,39 @@
-# Core Google
-google-api-python-client>=2.130.0  # <-- Updated Version (Example)
-google-auth>=2.29.0             # <-- Updated Version (Example)
-google-auth-oauthlib>=1.1.0
-gspread>=5.7.2
+#############################################
+# Meeting Analysis Bot – Requirements
+# Compatible with Python 3.10+
+# Updated for Gemini 2.5 API (google-generativeai >= 0.8.3)
+#############################################
 
-# Google AI (Gemini)
-google-generativeai==0.7.1        # <-- Updated Version (Example)
+# --- Core Google APIs ---
+google-api-python-client>=2.137.0
+google-auth>=2.34.0
+google-auth-oauthlib>=1.2.1
+gspread>=6.0.0
+
+# --- Google AI (Gemini SDK) ---
+# genai.upload_file() and file management available 0.8.0+
+google-generativeai>=0.8.3
 httpx>=0.27.0
 
-# Utilities
-pyyaml>=6.0.1
-tenacity>=8.2.3
-requests>=2.31.0
-pandas>=2.1.0
-numpy>=1.26.0
-mutagen>=1.47.0   # for accurate audio duration (mp3/m4a/ogg/wav)
+# --- General Utilities ---
+pyyaml>=6.0.2
+tenacity>=8.3.0
+requests>=2.32.3
+pandas>=2.2.3
+numpy>=1.26.4
+mutagen>=1.47.0        # For audio duration (mp3/m4a/ogg/wav)
 
-# Optional (reports/digests)
-matplotlib>=3.7.2
-pillow>=10.0.0
+# --- Optional (Analytics / Visuals) ---
+matplotlib>=3.9.2
+pillow>=11.0.0
 
-# Flask for backend API
-Flask>=2.0.0
-flask-cors>=3.1.1
+# --- Flask Backend (API) ---
+Flask>=3.0.3
+flask-cors>=4.0.1
 
-# Gunicorn for production deployment
-gunicorn>=21.2.0
+# --- Production Server ---
+gunicorn>=22.0.0
 
-# Optional (for other utilities, if necessary)
-xlrd>=2.0.1  # For reading Excel files (if required by your dashboard)
+# --- Optional Tools (Dashboard / Excel Support) ---
+xlrd>=2.0.1
+openpyxl>=3.1.5        # Recommended for Excel sheet handling
