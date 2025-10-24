@@ -138,7 +138,7 @@ def main():
     processed_this_run = 0
 
     # Pre-run quota probe (avoid wasting a file if RPD is already zero)
-    model_for_probe = (config.get("google_llm") or {}).get("model", "gemini-1.5-flash")
+    model_for_probe = (config.get("google_llm") or {}).get("model", "gemini-2.5-flash")
     if not _probe_gemini_quota_ok(model_for_probe):
         logging.error("Quota exhausted now; ending this run early.")
         sys.exit(0)
