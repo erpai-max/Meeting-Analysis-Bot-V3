@@ -17,7 +17,7 @@ google_sheets:
 # -------------------------
 google_llm:
   # Primary model for both transcription & analysis. (Flash is fast & economical)
-  model: "gemini-1.5-flash"
+  model: "gemini-2.5-flash"
   # Optional: if omitted, analysis falls back to "model" above
   # analysis_model: "gemini-2.5-flash"
   # Keep 1-call-per-file to reduce quota usage (can override via GEMINI_ONE_SHOT=0/1)
