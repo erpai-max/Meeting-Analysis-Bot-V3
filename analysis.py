@@ -78,7 +78,7 @@ def _is_quota_error(e: Exception) -> bool:
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
 # This DEFAULT_MODEL_NAME is usually a fallback, the config.yaml setting takes precedence.
-DEFAULT_MODEL_NAME = "gemini-2.5-flash" # Use a known stable default
+DEFAULT_MODEL_NAME = "gemini-1.5-flash" # Use a known stable default
 
 ERP_FEATURES = {
     "Tally import/export": ["tally", "tally import", "tally export"],
@@ -526,13 +526,13 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
             logging.warning(f"Transcription input file is empty or missing: {file_path}. Returning empty transcript.")
             return ""
 
-        # ✅ FIX: Use genai.upload_file instead of model.upload_file
+        # ✅ Use genai.upload_file
         uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
         uploaded_file_name = getattr(uploaded, "name", None)
         logging.info(f"File uploaded successfully for transcription: {uploaded_file_name}")
 
         prompt = "Transcribe the audio verbatim with punctuation. Do not summarize. Output plain text only."
-        # Construct contents list correctly for model.generate_content
+        # Construct contents list correctly
         contents = [{"role": "user", "parts": [prompt, uploaded]}]
         resp = model.generate_content(contents=contents, safety_settings=SAFETY_SETTINGS)
 
@@ -566,7 +566,6 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
         text = ""
         # Safely access text from parts
         if getattr(first_candidate, "content", None) and getattr(first_candidate.content, "parts", None):
-             # Some SDK versions put text in parts[0].text
              try:
                  text = first_candidate.content.parts[0].text.strip()
              except Exception:
@@ -684,7 +683,7 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
         raise RuntimeError(f"Analysis failed: {e}") from e
 
 # =========================================================================
-# == NEW _gemini_one_shot FUNCTION (Replaces the previous one) ==
+# == CORRECTED _gemini_one_shot FUNCTION (Fixes NameError) ==
 # =========================================================================
 @retry(reraise=True, stop=stop_after_attempt(3),
        wait=wait_exponential(multiplier=2, min=2, max=20),
@@ -697,17 +696,16 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
 
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
             logging.warning(f"One-shot input file is empty or missing: {file_path}. Returning error dict.")
-            # Return a dict that can be handled by _write_success, indicating error
             return {"error": "Input file was empty", "Risks / Unresolved Issues": "Input file was empty", "Society Name": f"EmptyFile_{os.path.basename(file_path)}"}
 
         logging.info(f"Uploading file via genai.upload_file for one-shot: {file_path}")
-        # ✅ FIX: Use genai.upload_file instead of model.upload_file
+        
+        # Use genai.upload_file (handles the v1beta/ragStoreName issue)
         uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
         uploaded_file_name = getattr(uploaded, "name", None)
         logging.info(f"File uploaded successfully for one-shot: {uploaded_file_name}")
 
         logging.info("Sending one-shot generate_content request with new content structure...")
-        # Construct contents list according to the new API style
         
         # ✅✅✅ THE FIX IS APPLIED HERE ✅✅✅
         # The variable 'uploaded' is now correctly used instead of 'uploaded_file'
@@ -723,8 +721,7 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
             safety_settings=SAFETY_SETTINGS
         )
 
-
-        # Process response (similar checks as before)
+        # Process response
         if getattr(response, "prompt_feedback", None) and response.prompt_feedback.block_reason:
              logging.error(f"One-shot prompt blocked: {response.prompt_feedback.block_reason} - Ratings: {response.prompt_feedback.safety_ratings}")
              raise RuntimeError(f"Prompt blocked due to {response.prompt_feedback.block_reason}")
