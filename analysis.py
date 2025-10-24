@@ -95,7 +95,7 @@ def _is_quota_error(e: Exception) -> bool:
 # Constants & Feature Maps
 # =========================
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
-DEFAULT_MODEL_NAME = "gemini-1.5-flash"  # Use a known stable default
+DEFAULT_MODEL_NAME = "gemini-2.5-flash"  # Use a known stable default
 
 ERP_FEATURES = {
     "Tally import/export": ["tally", "tally import", "tally export"],
