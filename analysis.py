@@ -522,15 +522,11 @@ def _gemini_transcribe(file_path: str, mime_type: str, model_name: str) -> str:
 
         prompt = "Transcribe the audio verbatim with punctuation. Do not summarize. Output plain text only."
         
-        # ✅ FIXED: Single user message with both prompt and file
-        contents = [
-            {
-                "role": "user",
-                "parts": [prompt, uploaded]
-            }
-        ]
-
-        resp = model.generate_content(contents=contents, safety_settings=SAFETY_SETTINGS)
+        # ✅ FIXED: Use simple list format
+        resp = model.generate_content(
+            [prompt, uploaded],
+            safety_settings=SAFETY_SETTINGS
+        )
 
         if getattr(resp, "prompt_feedback", None) and resp.prompt_feedback.block_reason:
             logging.error(f"Transcription prompt blocked: {resp.prompt_feedback.block_reason} - Ratings: {resp.prompt_feedback.safety_ratings}")
@@ -702,17 +698,9 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
 
         logging.info("Sending one-shot generate_content request with corrected content structure...")
         
-        # ✅✅✅ MAIN FIX: Single user message with both prompt and file ✅✅✅
+        # ✅✅✅ MAIN FIX: Use simple list format instead of role/parts structure ✅✅✅
         response = model.generate_content(
-            contents=[
-                {
-                    "role": "user",
-                    "parts": [
-                        master_prompt,  # Text prompt first
-                        uploaded        # Then the uploaded file
-                    ]
-                }
-            ],
+            [master_prompt, uploaded],  # Simple list format
             generation_config={
                 "temperature": 0.2,
                 "response_mime_type": "application/json"
