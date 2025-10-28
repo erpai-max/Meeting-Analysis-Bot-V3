@@ -614,8 +614,7 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
         resp = model.generate_content(
             contents=contents,
             generation_config={
-                "temperature": 0.2,
-                "response_mime_type": "application/json",
+                "temperature": 0.2
             },
             safety_settings=SAFETY_SETTINGS
         )
@@ -715,8 +714,7 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
         response = model.generate_content(
             [master_prompt, uploaded],  # Simple list format
             generation_config={
-                "temperature": 0.2,
-                "response_mime_type": "application/json"
+                "temperature": 0.2
             },
             safety_settings=SAFETY_SETTINGS
         )
