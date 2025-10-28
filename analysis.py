@@ -487,12 +487,25 @@ def _is_one_shot(config: Dict[str, Any]) -> bool:
     logging.info(f"Config 'one_shot' setting: {one_shot_config}. One-shot mode: {one_shot_config}")
     return one_shot_config
 
-SAFETY_SETTINGS = {
-    'HARM_CATEGORY_HARASSMENT': 'block_none',
-    'HARM_CATEGORY_HATE_SPEECH': 'block_none',
-    'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'block_none',
-    'HARM_CATEGORY_DANGEROUS_CONTENT': 'block_none',
-}
+SAFETY_SETTINGS = [
+    {
+        "category": "HARM_CATEGORY_HARASSMENT",
+        "threshold": "BLOCK_NONE",
+    },
+    {
+        "category": "HARM_CATEGORY_HATE_SPEECH",
+        "threshold": "BLOCK_NONE",
+    },
+    {
+        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        "threshold": "BLOCK_NONE",
+    },
+    {
+        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+        "threshold": "BLOCK_NONE",
+    },
+]
+
 
 
 # =========================================================================
