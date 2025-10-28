@@ -78,7 +78,6 @@ def retry_quarantined_files(drive_service, gsheets_sheet, config):
             file_name = file["name"]
 
             if created_time:
-                # createdTime format: 2025-09-18T12:34:56.000Z
                 created_epoch = time.mktime(time.strptime(created_time[:19], "%Y-%m-%dT%H:%M:%S"))
                 if (time.time() - created_epoch) > cooloff_secs:
                     logging.info(f"Retrying quarantined file: {file_name} (ID: {file_id})")
@@ -91,12 +90,7 @@ def retry_quarantined_files(drive_service, gsheets_sheet, config):
     except Exception as e:
         logging.error(f"ERROR while retrying quarantined files: {e}")
 
-# ---------- Pre-run quota probe ----------
 def _probe_gemini_quota_ok(model_name: str) -> bool:
-    """
-    Fire a tiny request to detect RPD/RPM exhaustion early.
-    Returns False on 429/quota errors; True otherwise.
-    """
     try:
         import google.generativeai as genai
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -111,7 +105,6 @@ def _probe_gemini_quota_ok(model_name: str) -> bool:
         if any(k in msg for k in ["429", "quota", "resourceexhausted", "rate limit", "too many requests"]):
             logging.error("Gemini quota/rate-limit appears exhausted (probe).")
             return False
-        # Other errors: don't block the run
         logging.warning(f"Quota probe non-fatal error: {e}")
         return True
 
@@ -131,13 +124,14 @@ def main():
         logging.error(f"CRITICAL: Could not load config file: {e}. Exiting.")
         sys.exit(1)
 
-    # Processing knobs
+    # Add your RAG corpus ID here for all analysis calls
+    config["rag_store_name"] = "your_rag_store_id_here"
+
     proc_conf = config.get("processing", {})
     max_files = int(proc_conf.get("max_files_per_run", 999999))
     per_file_sleep = float(proc_conf.get("sleep_between_files_sec", 0.0))
     processed_this_run = 0
 
-    # Pre-run quota probe (avoid wasting a file if RPD is already zero)
     model_for_probe = (config.get("google_llm") or {}).get("model", "gemini-2.5-flash")
     if not _probe_gemini_quota_ok(model_for_probe):
         logging.error("Quota exhausted now; ending this run early.")
@@ -147,24 +141,19 @@ def main():
     if not drive_service or not gsheets_sheet:
         sys.exit(1)
 
-    # Ensure tabs exist & headers
     sheets.ensure_tabs_exist(gsheets_sheet, config)
-
-    # Read already processed IDs
     try:
         processed_file_ids = sheets.get_processed_file_ids(gsheets_sheet, config)
     except Exception as e:
         logging.warning(f"Could not read processed ledger: {e}. Continuing with empty list.")
         processed_file_ids = []
 
-    # Retry quarantine (configurable cool-off)
     retry_quarantined_files(drive_service, gsheets_sheet, config)
-
     parent_folder_id = config["google_drive"]["parent_folder_id"]
     team_folders = gdrive.discover_team_folders(drive_service, parent_folder_id)
 
     logging.info("Starting to check discovered team folders...")
-    stop_due_to_quota = False  # stop immediately on quota
+    stop_due_to_quota = False
 
     for member_name, folder_id in team_folders.items():
         if stop_due_to_quota:
@@ -180,7 +169,7 @@ def main():
                     break
                 if processed_this_run >= max_files:
                     logging.info(f"Reached max_files_per_run={max_files}. Ending this run gracefully.")
-                    stop_due_to_quota = True  # soft stop for this run
+                    stop_due_to_quota = True
                     break
 
                 file_id = file_meta["id"]
@@ -190,13 +179,11 @@ def main():
                 try:
                     analysis.process_single_file(drive_service, gsheets_sheet, file_meta, member_name, config)
 
-                    # Move to processed folder after success
                     processed_folder_id = config["google_drive"]["processed_folder_id"]
                     gdrive.move_file(drive_service, file_id, folder_id, processed_folder_id)
 
                 except QuotaExceeded:
                     logging.error("Quota exceeded — stopping this run now.")
-                    # Quarantine this file if not already moved
                     try:
                         gdrive.quarantine_file(drive_service, file_id, folder_id, "Gemini quota exceeded; pausing run", config)
                         sheets.update_ledger(gsheets_sheet, file_id, "Quarantined",
@@ -210,7 +197,6 @@ def main():
                     gdrive.quarantine_file(drive_service, file_id, folder_id, str(e), config)
                     sheets.update_ledger(gsheets_sheet, file_id, "Quarantined", str(e), config, file_name)
 
-                # Throttle to protect RPM
                 processed_this_run += 1
                 if per_file_sleep > 0 and not stop_due_to_quota:
                     time.sleep(per_file_sleep)
