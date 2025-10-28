@@ -48,6 +48,12 @@ runtime:
   tmp_dir: "/tmp"
 
 # -------------------------
+# RAG Configuration (NEW)
+# -------------------------
+# Your RAG Corpus ID from Vertex AI Search and Conversation
+rag_store_name: "meeting-analysis-corpus"
+
+# -------------------------
 # Manager enrichment (used to auto-fill Owner/Manager/Team/Emails)
 # -------------------------
 manager_map:
@@ -89,10 +95,9 @@ weekly_digest:
 dashboard:
   output_dir: "docs"
   filename: "dashboard_data.json"
-  copy_html_from_root: true   # copies dashboard.html → docs/index.html automatically
-  strip_columns:              # optional: remove sensitive fields from public JSON
+  copy_html_from_root: true    # copies dashboard.html → docs/index.html automatically
+  strip_columns:             # optional: remove sensitive fields from public JSON
     - "Email Id"
     - "Manager Email"
     - "Media Link"
     - "Doc Link"
-
