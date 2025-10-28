@@ -1,5 +1,5 @@
 # analysis.py
-# Meeting Analysis Bot - Gemini (2.5 Model Version)
+# Meeting Analysis Bot - Gemini (2.5 Model Version) with RAG Support
 # Requirements: google-generativeai >= 0.8.0, google-api-python-client, mutagen (optional), tenacity
 
 # --- Quiet gRPC/absl logs BEFORE importing Google/gRPC libraries ---
@@ -506,6 +506,8 @@ SAFETY_SETTINGS = [
     },
 ]
 
+# Your RAG Corpus ID here. Replace with actual corpus ID from Vertex AI Console
+RAG_STORE_ID = "your_rag_store_id_here"
 
 
 # =========================================================================
@@ -684,13 +686,13 @@ def _gemini_analyze(transcript: str, master_prompt: str, model_name: str) -> Dic
 
 
 # =========================================================================
-# CORRECTED _gemini_one_shot FUNCTION (MAIN FIX)
+# _gemini_one_shot FUNCTION (WITH RAG SUPPORT)
 # =========================================================================
 
 @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20),
        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS))
 def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_name: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    """One-shot analysis using Gemini with file upload and structured prompt."""
+    """One-shot analysis using Gemini with file upload, structured prompt, and RAG."""
     
     uploaded_file_name = None
     
@@ -701,18 +703,24 @@ def _gemini_one_shot(file_path: str, mime_type: str, master_prompt: str, model_n
             logging.warning(f"One-shot input file is empty or missing: {file_path}. Returning error dict.")
             return {"error": "Input file was empty", "Risks / Unresolved Issues": "Input file was empty", "Society Name": f"EmptyFile_{os.path.basename(file_path)}"}
 
-        logging.info(f"Uploading file via genai.upload_file for one-shot: {file_path}")
+        logging.info(f"Uploading file via genai.upload_file for one-shot with RAG store: {RAG_STORE_ID}")
         
-        uploaded = genai.upload_file(path=file_path, mime_type=mime_type)
+        # --- RAG SUPPORT ADDED ---
+        uploaded = genai.upload_file(
+            path=file_path, 
+            mime_type=mime_type, 
+            rag_store_name=RAG_STORE_ID
+        )
         uploaded_file_name = getattr(uploaded, "name", None)
         
         logging.info(f"File uploaded successfully for one-shot: {uploaded_file_name}")
 
-        logging.info("Sending one-shot generate_content request with corrected content structure...")
+        logging.info("Sending one-shot generate_content request with RAG store...")
         
-        # ✅✅✅ MAIN FIX: Use simple list format instead of role/parts structure ✅✅✅
         response = model.generate_content(
             [master_prompt, uploaded],  # Simple list format
+            # --- RAG SUPPORT ADDED ---
+            rag_store_name=RAG_STORE_ID,
             generation_config={
                 "temperature": 0.2
             },
@@ -848,10 +856,10 @@ def _augment_with_manager_info(analysis_obj: Dict[str, Any], member_name: str, c
                 
                 mgr_email = None
                 for key, email in manager_emails.items():
-                     if key.strip().lower() == manager_name_stripped.lower():
-                        mgr_email = email
-                        break
-                        
+                        if key.strip().lower() == manager_name_stripped.lower():
+                            mgr_email = email
+                            break
+                            
                 analysis_obj["Manager Email"] = mgr_email if mgr_email is not None else analysis_obj.get("Manager Email", "")
             else:
                 analysis_obj.setdefault("Manager Email", "")
@@ -1028,9 +1036,9 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
             created_iso = meta.get("createdTime")
 
             if not file_name or file_name.startswith("Unknown_"):
-                 logging.warning(f"Filename missing or generic in metadata for {file_id}. Using fallback.")
-                 file_name = f"File_{file_id}"
-                 
+                    logging.warning(f"Filename missing or generic in metadata for {file_id}. Using fallback.")
+                    file_name = f"File_{file_id}"
+                    
             logging.info(f"[Gemini] Processing: '{file_name}' ({mime_type}) | ID: {file_id}")
             
         except Exception as e:
@@ -1086,7 +1094,7 @@ def process_single_file(drive_service, gsheets_sheet, file_meta: Dict[str, Any],
             analysis_obj = _gemini_one_shot(local_path, mime_type, master_prompt, model_to_use, config)
             transcript = analysis_obj.get("transcript_full", "")
             if not transcript or "Transcription failed" in transcript:
-                 logging.warning(f"Transcript may be missing or failed in one-shot result for '{file_name}'")
+                    logging.warning(f"Transcript may be missing or failed in one-shot result for '{file_name}'")
         else:
             transcribe_model = _get_model(config)
             logging.info(f"Calling Gemini transcribe with model: {transcribe_model}")
