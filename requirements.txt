@@ -1,3 +1,7 @@
+# ==========================================================
+# 📦 PROJECT DEPENDENCIES
+# ==========================================================
+
 # --- Core Google APIs ---
 google-api-python-client>=2.137.0
 google-auth>=2.34.0
@@ -5,8 +9,8 @@ google-auth-oauthlib>=1.2.1
 gspread>=6.0.0
 
 # --- Google AI (Gemini SDK) ---
-# Updated to a modern version that supports RAG
-google-generativeai>=1.0.0
+# Note: Latest available version as of Nov 2025 is 0.8.5 (no 1.x yet)
+google-generativeai==0.8.5
 httpx>=0.27.0
 
 # --- General Utilities ---
@@ -15,7 +19,7 @@ tenacity>=8.3.0
 requests>=2.32.3
 pandas>=2.2.3
 numpy>=1.26.4
-mutagen>=1.47.0      # For audio duration (mp3/m4a/ogg/wav)
+mutagen>=1.47.0        # For audio duration (mp3/m4a/ogg/wav)
 
 # --- Optional (Analytics / Visuals) ---
 matplotlib>=3.9.2
@@ -29,4 +33,11 @@ flask-cors>=4.0.1
 gunicorn>=22.0.0
 
 # --- Optional Tools (Dashboard / Excel Support) ---
-openpyxl>=3.1.5      # Recommended for Excel sheet handling
+openpyxl>=3.1.5        # Recommended for Excel sheet handling
+
+# ==========================================================
+# ✅ Notes:
+# - All dependencies compatible with Python 3.10–3.12.
+# - google-generativeai pinned to 0.8.5 (stable, verified on PyPI).
+# - Use pip >= 23.3 and setuptools >= 68 for best results.
+# ==========================================================
