@@ -7,6 +7,8 @@
 # -------------------------
 google_drive:
   parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
+  processed_folder_id: "PASTE_PROCESSED_FOLDER_ID_HERE"
+  quarantine_folder_id: "PASTE_QUARANTINE_FOLDER_ID_HERE"
 
 # -------------------------
 # Google Sheets
@@ -21,25 +23,26 @@ google_sheets:
 # -------------------------
 google_llm:
   model: "gemini-2.5-flash"
-  analysis_model: "gemini-2.5-flash"
-
-  # MUST be false (no upload / no RAG / no paid APIs)
-  one_shot: false
-
-  temperature: 0.2
+  one_shot: false   # MUST remain false (no upload / no RAG / no paid APIs)
 
 # -------------------------
 # Processing controls
 # -------------------------
 processing:
   max_files_per_run: 999999
-  sleep_between_files_sec: 1.5   # recommended for free quota safety
+  sleep_between_files_sec: 1.5   # quota-safe for free tier
 
 # -------------------------
 # Runtime paths
 # -------------------------
 runtime:
   tmp_dir: "/tmp"
+
+# -------------------------
+# Quarantine behavior
+# -------------------------
+quarantine:
+  auto_retry_after_hours: 24
 
 # -------------------------
 # Manager enrichment
