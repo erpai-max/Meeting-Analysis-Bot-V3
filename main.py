@@ -37,7 +37,6 @@ logging.basicConfig(
 # AUTHENTICATION
 # -------------------------------------------------------------------
 def authenticate_google(config):
-    """Authenticate Google Drive + Google Sheets."""
     try:
         gcp_key_str = os.environ.get("GCP_SA_KEY")
         if not gcp_key_str:
@@ -74,7 +73,6 @@ def authenticate_google(config):
 def export_data_for_dashboard(gsheets_sheet, config):
     dashboard_cfg = config.get("dashboard", {})
     if not dashboard_cfg:
-        logging.info("Dashboard config not found. Skipping export.")
         return
 
     output_dir = dashboard_cfg.get("output_dir", "docs")
@@ -86,10 +84,7 @@ def export_data_for_dashboard(gsheets_sheet, config):
 
         strip_columns = dashboard_cfg.get("strip_columns", [])
         if strip_columns:
-            cleaned = []
-            for r in records:
-                cleaned.append({k: v for k, v in r.items() if k not in strip_columns})
-            records = cleaned
+            records = [{k: v for k, v in r.items() if k not in strip_columns} for r in records]
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -98,11 +93,9 @@ def export_data_for_dashboard(gsheets_sheet, config):
 
         logging.info(f"Dashboard export complete: {output_path}")
 
-        if dashboard_cfg.get("copy_html_from_root", False):
+        if dashboard_cfg.get("copy_html_from_root", False) and os.path.exists("dashboard.html"):
             import shutil
-            if os.path.exists("dashboard.html"):
-                shutil.copyfile("dashboard.html", os.path.join(output_dir, "index.html"))
-                logging.info("Dashboard HTML copied to docs/index.html")
+            shutil.copyfile("dashboard.html", os.path.join(output_dir, "index.html"))
 
     except Exception as e:
         logging.error(f"Dashboard export failed: {e}", exc_info=True)
@@ -112,17 +105,12 @@ def export_data_for_dashboard(gsheets_sheet, config):
 # -------------------------------------------------------------------
 def retry_quarantined_files(drive_service, gsheets_sheet, config):
     try:
-        quarantine_cfg = config.get("quarantine", {})
-        hours = int(quarantine_cfg.get("auto_retry_after_hours", 24))
+        hours = int(config.get("quarantine", {}).get("auto_retry_after_hours", 24))
         if hours <= 0:
             return
 
         quarantine_id = config["google_drive"].get("quarantine_folder_id")
         parent_id = config["google_drive"].get("parent_folder_id")
-
-        if not quarantine_id or not parent_id:
-            return
-
         cooldown = hours * 3600
         now_epoch = time.time()
 
@@ -147,7 +135,6 @@ def retry_quarantined_files(drive_service, gsheets_sheet, config):
                     config,
                     f["name"]
                 )
-                logging.info(f"Auto-retried quarantined file: {f['name']}")
 
     except Exception as e:
         logging.error(f"Error during quarantine retry: {e}", exc_info=True)
@@ -170,16 +157,18 @@ def main():
     if not drive_service or not gsheets_sheet:
         sys.exit(1)
 
-    processed_ids = set()
     try:
-        processed_ids = sheets.get_processed_file_ids(gsheets_sheet, config)
+        processed_ids = set(sheets.get_processed_file_ids(gsheets_sheet, config))
     except Exception:
+        processed_ids = set()
         logging.warning("Could not read processed IDs. Will process all files.")
 
     retry_quarantined_files(drive_service, gsheets_sheet, config)
 
-    parent_folder_id = config["google_drive"]["parent_folder_id"]
-    team_folders = gdrive.discover_team_folders(drive_service, parent_folder_id)
+    team_folders = gdrive.discover_team_folders(
+        drive_service,
+        config["google_drive"]["parent_folder_id"]
+    )
 
     max_files = int(config.get("processing", {}).get("max_files_per_run", 999999))
     sleep_sec = float(config.get("processing", {}).get("sleep_between_files_sec", 1.5))
@@ -187,13 +176,10 @@ def main():
     processed_this_run = 0
 
     for member_name, folder_id in team_folders.items():
-        logging.info(f"Checking folder for {member_name}")
-
         files = gdrive.get_files_to_process(drive_service, folder_id, processed_ids)
 
         for file_meta in files:
             if processed_this_run >= max_files:
-                logging.info("Reached max_files_per_run limit.")
                 break
 
             file_id = file_meta["id"]
@@ -208,9 +194,21 @@ def main():
                     config
                 )
 
-                processed_folder_id = config["google_drive"].get("processed_folder_id")
-                if processed_folder_id:
-                    gdrive.move_file(drive_service, file_id, folder_id, processed_folder_id)
+                gdrive.move_file(
+                    drive_service,
+                    file_id,
+                    folder_id,
+                    config["google_drive"]["processed_folder_id"]
+                )
+
+                sheets.update_ledger(
+                    gsheets_sheet,
+                    file_id,
+                    "Processed",
+                    "Completed successfully",
+                    config,
+                    file_name
+                )
 
                 processed_ids.add(file_id)
                 processed_this_run += 1
@@ -235,8 +233,8 @@ def main():
                         config,
                         file_name
                     )
-                except Exception as qe:
-                    logging.error(f"Failed to quarantine {file_name}: {qe}")
+                except Exception:
+                    pass
 
             if sleep_sec > 0:
                 time.sleep(sleep_sec)
