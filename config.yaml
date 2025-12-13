@@ -7,8 +7,8 @@
 # -------------------------
 google_drive:
   parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
-  processed_folder_id: "PASTE_PROCESSED_FOLDER_ID_HERE"
-  quarantine_folder_id: "PASTE_QUARANTINE_FOLDER_ID_HERE"
+  processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
+  quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
 
 # -------------------------
 # Google Sheets
