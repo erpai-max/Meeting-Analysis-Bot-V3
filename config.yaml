@@ -1,45 +1,39 @@
 # ===================================================================
-# CONFIGURATION FILE — Meeting Analysis Bot v5 (Gemini-only)
+# CONFIGURATION FILE — Meeting Analysis Bot (FREE Gemini, Dec 2025)
 # ===================================================================
 
+# -------------------------
+# Google Drive
+# -------------------------
 google_drive:
   parent_folder_id: "1crSl9J-4upLBwK3ZYXkZ401uWG0XEzSz"
-  processed_folder_id: "13D64XwDJm9dig5pFkVXd99IO0XO4WvQy"
-  quarantine_folder_id: "1Ubjt5QeUd8zj7cenxne3i5BEMVM076tN"
 
+# -------------------------
+# Google Sheets
+# -------------------------
 google_sheets:
   sheet_id: "1VG6U9SvbsCuOSnympp4fL19SZRWZPJsQmAo5fnF2wdI"
   results_tab_name: "Analysis Results"
   ledger_tab_name: "Processed Ledger"
 
 # -------------------------
-# Google LLM (Gemini)
+# Google LLM (Gemini – FREE)
 # -------------------------
 google_llm:
-  # Primary model for both transcription & analysis. (Flash is fast & economical)
   model: "gemini-2.5-flash"
-  # Optional: if omitted, analysis falls back to "model" above
-  # analysis_model: "gemini-2.5-flash"
-  # Keep 1-call-per-file to reduce quota usage (can override via GEMINI_ONE_SHOT=0/1)
-  one_shot: true
-  # Optional: If prompt.txt is missing, we'll use this inline schema prompt (leave blank to rely on file)
-  # schema_prompt: ""
+  analysis_model: "gemini-2.5-flash"
+
+  # MUST be false (no upload / no RAG / no paid APIs)
+  one_shot: false
+
+  temperature: 0.2
 
 # -------------------------
 # Processing controls
 # -------------------------
 processing:
-  # Safety cap to avoid huge runs in one go; set high if you want no practical cap
   max_files_per_run: 999999
-  # Small delay between files to avoid RPM spikes (seconds)
-  sleep_between_files_sec: 0.0
-
-# -------------------------
-# Quarantine behavior
-# -------------------------
-quarantine:
-  # After this cool-off window, quarantined files get moved back for automatic retry
-  auto_retry_after_hours: 24
+  sleep_between_files_sec: 1.5   # recommended for free quota safety
 
 # -------------------------
 # Runtime paths
@@ -48,13 +42,7 @@ runtime:
   tmp_dir: "/tmp"
 
 # -------------------------
-# RAG Configuration (NEW)
-# -------------------------
-# Your RAG Corpus ID from Vertex AI Search and Conversation
-rag_store_name: "meeting-analysis-corpus"
-
-# -------------------------
-# Manager enrichment (used to auto-fill Owner/Manager/Team/Emails)
+# Manager enrichment
 # -------------------------
 manager_map:
   Sripal: { Manager: "Saleem", Team: "Chennai", Email: "sripal.r@nobroker.in" }
@@ -77,17 +65,17 @@ manager_map:
   Waseema: { Manager: "Rahul Chugh", Team: "CT", Email: "waseema.firdous@nobroker.in" }
   Ashish: { Manager: "Rahul Chugh", Team: "CT", Email: "ashish.haldar@nobroker.in" }
   Nishant: { Manager: "Rahul Chugh", Team: "CT", Email: "nishant.paul@nobroker.in" }
-  Rahul Chugh: {Manager: "Saumya B", Team: "CT", Email: "rahul.chugh@nobroker.in" }
+  Rahul Chugh: { Manager: "Saumya B", Team: "CT", Email: "rahul.chugh@nobroker.in" }
 
 manager_emails:
   Saleem: "saleem.hk@nobroker.in"
   Dipesh: "dipesh.karale@nobroker.in"
   Pratik: "pratik.ray@nobroker.in"
   Rahul Chugh: "rahul.chugh@nobroker.in"
-  Saumy B: "saumya.biswal@nobroker.in"
+  Saumya B: "saumya.biswal@nobroker.in"
 
 # -------------------------
-# Optional feature: weekly digest (not required by the core run)
+# Weekly digest & dashboard
 # -------------------------
 weekly_digest:
   enabled: true
@@ -95,8 +83,8 @@ weekly_digest:
 dashboard:
   output_dir: "docs"
   filename: "dashboard_data.json"
-  copy_html_from_root: true    # copies dashboard.html → docs/index.html automatically
-  strip_columns:             # optional: remove sensitive fields from public JSON
+  copy_html_from_root: true
+  strip_columns:
     - "Email Id"
     - "Manager Email"
     - "Media Link"
