@@ -1,17 +1,18 @@
 # ==========================================================
-# 📦 PROJECT DEPENDENCIES
+# 📦 PROJECT DEPENDENCIES — Meeting Analysis Bot
+# FREE Gemini (Dec 2025, Stable)
 # ==========================================================
 
 # --- Core Google APIs ---
-google-api-python-client>=2.137.0
+google-api-python-client==2.137.0
 google-auth>=2.34.0
 google-auth-oauthlib>=1.2.1
 gspread>=6.0.0
 
 # --- Google AI (Gemini SDK) ---
-# Note: Latest available version as of Nov 2025 is 0.8.5 (no 1.x yet)
+# Stable FREE SDK (no Client / no Vertex)
 google-generativeai==0.8.5
-httpx>=0.27.0
+# httpx>=0.27.0   # Optional – not required by current code
 
 # --- General Utilities ---
 pyyaml>=6.0.2
@@ -25,19 +26,19 @@ mutagen>=1.47.0        # For audio duration (mp3/m4a/ogg/wav)
 matplotlib>=3.9.2
 pillow>=11.0.0
 
-# --- Flask Backend (API) ---
+# --- Flask Backend (API / Dashboard) ---
 Flask>=3.0.3
 flask-cors>=4.0.1
 
 # --- Production Server ---
 gunicorn>=22.0.0
 
-# --- Optional Tools (Dashboard / Excel Support) ---
-openpyxl>=3.1.5        # Recommended for Excel sheet handling
+# --- Optional Tools (Excel / Sheets Support) ---
+openpyxl>=3.1.5
 
 # ==========================================================
 # ✅ Notes:
-# - All dependencies compatible with Python 3.10–3.12.
-# - google-generativeai pinned to 0.8.5 (stable, verified on PyPI).
-# - Use pip >= 23.3 and setuptools >= 68 for best results.
+# - Compatible with Python 3.10–3.12
+# - Gemini model: gemini-2.5-flash
+# - No paid APIs, no Vertex AI, no Client usage
 # ==========================================================
