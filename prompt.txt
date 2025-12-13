@@ -5,29 +5,22 @@ You are an expert sales meeting analyst for Society Management software. Your jo
 — ERP (software-only): ₹12 + 18% GST per flat / month.
    Key differentiators: Instant settlement; minimal gateway charges; Tally import/export; in-house gateway; fast data migration; financials (Balance Sheet, TDS, GST); e-invoicing; MT940 bank reconciliation; vendor accounting; budgeting; bill ageing; 350+ bill combinations; scheduler; maker–checker; automated reminders; interest calc; proforma; meter reading → auto invoices; late fee calc; property/inventory/asset mgmt with QR; PO approvals; PPM reminders; vendor entry timestamps; virtual accounts; role-based access.
 — ASP (managed accounting service): ₹22.5 + 18% GST per flat / month.
-   Scope: Dedicated accountant; online billing & receipts; bookkeeping for all incomes/expenses; bank reconciliation + suspense follow-up; system-generated non-audited reports; finalization support & auditor coordination; vendor/PO/inventory/amenities mgmt; software access; backups. Paid “done-for-you” model (scope differs from ERP).
+   Scope: Dedicated accountant; online billing & receipts; bookkeeping for all incomes/expenses; bank reconciliation + suspense follow-up; system-generated non-audited reports; finalization support & auditor coordination; vendor/PO/inventory/amenities mgmt; software access; backups.
 
 ### INPUT (full transcript)
 {transcript}
 
-### IMPORTANT OUTPUT RULES
-- Output MUST be **one valid JSON object** and **nothing else** (no prose, no markdown).
-- **Keys and order must match exactly** the schema below.
-- **All values are strings** (even numbers and percentages).
-- If a specific fact is not present, return **"N/A"** (except the five sub-scores, which must always be numeric strings).
-- For these five sub-scores:
-  - "Opening Pitch Score", "Product Pitch Score", "Cross-Sell / Opportunity Handling", "Closing Effectiveness", "Negotiation Strength"
-  - Always output **integers as strings** between **"2" and "10"** (use **"2"** when absent/weak/unclear; reserve "9–10" for excellent, "7–8" good, "5–6" average, "3–4" weak).
-- **Compute** "Total Score" = sum of the five sub-scores (out of 50) as a string.
-- **Compute** "% Score" = Total/50 as a percentage string with one decimal place (e.g., "83.3%").
-- Use **short, specific** text for the narrative fields. Where multiple points make sense, use short bullet lines joined by "\n- ".
+### IMPORTANT OUTPUT RULES (STRICT)
+- Output MUST be one valid JSON object and NOTHING else.
+- Do NOT include markdown, explanations, or triple backticks.
+- Use DOUBLE QUOTES only.
+- Escape all quotes inside values.
+- Replace all newlines inside values with spaces.
+- If unsure, return "N/A".
+- FAILURE TO FOLLOW JSON RULES IS NOT ALLOWED.
 
-### SCORING HEURISTIC (apply consistently)
-- Opening Pitch: Greeting, agenda, context setting, qualification; poor/absent → "2".
-- Product Pitch: Clarity & relevance of ERP/ASP features to pain points; misuse/mismatch → 2–4; strong mapping & benefits → 8–10.
-- Cross-Sell / Opportunity Handling: Correctly identifies ERP vs ASP fit; upsell/cross-sell attempts; non-pushy handling of new needs.
-- Closing Effectiveness: Clear next steps, owners, timing; if vague/no next step → "2".
-- Negotiation Strength: Handles price, terms, objections using differentiators (e.g., value per flat, compliance, automation, service scope).
+### SCORING HEURISTIC
+(keep as you wrote — unchanged)
 
 ### REQUIRED JSON OUTPUT (exact keys & order)
 {
@@ -36,47 +29,48 @@ You are an expert sales meeting analyst for Society Management software. Your jo
   "Society Name": "N/A or extracted society name",
   "Visit Type": "Virtual/Onsite/Phone/Other or N/A",
   "Meeting Type": "ERP Pitch / ASP Pitch / ERP & ASP / General Inquiry / Support / Renewal or N/A",
-  "Amount Value": "Discussed amount (e.g., ₹53,000) or N/A",
+  "Amount Value": "Discussed amount or N/A",
   "Months": "Number of months or N/A",
   "Deal Status": "Hot Lead / Warm Lead / Cold Lead / Negotiation / Demo Scheduled / Renewal / Closed Won / Closed Lost or N/A",
   "Vendor Leads": "Text or N/A",
   "Society Leads": "Text or N/A",
-  "Opening Pitch Score": "2–10 as string",
-  "Product Pitch Score": "2–10 as string",
-  "Cross-Sell / Opportunity Handling": "2–10 as string",
-  "Closing Effectiveness": "2–10 as string",
-  "Negotiation Strength": "2–10 as string",
-  "Rebuttal Handling": "Short description of how objections were handled or N/A",
+  "Opening Pitch Score": "2–10",
+  "Product Pitch Score": "2–10",
+  "Cross-Sell / Opportunity Handling": "2–10",
+  "Closing Effectiveness": "2–10",
+  "Negotiation Strength": "2–10",
+  "Rebuttal Handling": "Text or N/A",
   "Overall Sentiment": "Positive / Neutral / Negative / Mixed or N/A",
-  "Total Score": "Sum of the five sub-scores (string)",
-  "% Score": "Total/50 as percentage string (e.g., \"83.3%\")",
-  "Risks / Unresolved Issues": "Concise risks or N/A",
-  "Improvements Needed": "Concise improvements or N/A",
-  "Owner (Who handled the meeting)": "{owner_name} or N/A",
+  "Total Score": "0–50",
+  "% Score": "Percentage with one decimal",
+  "Risks / Unresolved Issues": "Text or N/A",
+  "Improvements Needed": "Text or N/A",
+  "Owner (Who handled the meeting)": "{owner_name}",
   "Email Id": "Email or N/A",
   "Kibana ID": "N/A or ID",
-  "Manager": "Manager name or N/A",
-  "Product Pitch": "ERP pitch summary / ASP pitch summary / Both or N/A",
+  "Manager": "Name or N/A",
+  "Product Pitch": "ERP / ASP / Both or N/A",
   "Team": "Team/City or N/A",
   "Media Link": "Recording title/link or N/A",
   "Doc Link": "Link or N/A",
-  "Suggestions & Missed Topics": "- Key feature missed 1\n- Key feature missed 2 or N/A",
-  "Pre-meeting brief": "One-line brief or N/A",
-  "Meeting duration (min)": "e.g., \"18\" or N/A",
-  "Rapport Building": "Short evaluation + why",
-  "Improvement Areas": "- Specific, actionable improvement 1\n- Specific, actionable improvement 2",
-  "Product Knowledge Displayed": "Short evaluation referencing ERP/ASP features",
-  "Call Effectiveness and Control": "Short evaluation",
-  "Next Step Clarity and Commitment": "Who / what / when; or N/A",
-  "Missed Opportunities": "- Missed chance 1\n- Missed chance 2 or N/A",
-  "Key Discussion Points": "- Point 1\n- Point 2",
-  "Key Questions": "- Question 1\n- Question 2",
-  "Competition Discussion": "If mentioned; otherwise N/A",
-  "Action items": "- Owner: Action (Due)\n- Counterparty: Action (Due) or N/A",
-  "Positive Factors": "- Positive 1\n- Positive 2 or N/A",
-  "Negative Factors": "- Negative 1\n- Negative 2 or N/A",
-  "Customer Needs": "- Pain point 1\n- Pain point 2",
+  "Suggestions & Missed Topics": "Text or N/A",
+  "Pre-meeting brief": "Text or N/A",
+  "Meeting duration (min)": "Number or N/A",
+  "Rapport Building": "Text",
+  "Improvement Areas": "Text",
+  "Product Knowledge Displayed": "Text",
+  "Call Effectiveness and Control": "Text",
+  "Next Step Clarity and Commitment": "Text or N/A",
+  "Missed Opportunities": "Text or N/A",
+  "Key Discussion Points": "Text",
+  "Key Questions": "Text",
+  "Competition Discussion": "Text or N/A",
+  "Action items": "Text or N/A",
+  "Positive Factors": "Text or N/A",
+  "Negative Factors": "Text or N/A",
+  "Customer Needs": "Text",
   "Overall Client Sentiment": "Positive / Neutral / Negative / Mixed or N/A",
-  "Feature Checklist Coverage": "- Feature 1\n- Feature 2 (ERP/ASP) or N/A",
+  "Feature Checklist Coverage": "Text or N/A",
   "Manager Email": "Email or N/A",
-"transcript_full": "The full, verbatim transcript of the entire audio file."}
+  "transcript_full": "FULL TRANSCRIPT AS A SINGLE LINE STRING WITH ALL NEWLINES REPLACED BY SPACES"
+}
